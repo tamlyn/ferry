@@ -1,0 +1,6 @@
+CONFIG_IDF_TARGET="esp32s3"
+
+# The native USB port (GPIO19/20) is dedicated to hosting the mouse + keyboard,
+# so it cannot also serve the USB-Serial-JTAG console — they share the same PHY.
+# Logs therefore go out over UART0 (the dev-kit's UART-bridge port). See README.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y

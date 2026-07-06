@@ -1,0 +1,5 @@
+## Managed dependencies pulled by the ESP-IDF component manager at build time.
+dependencies:
+  idf: ">=5.1"
+  # USB Host HID class driver (boot + report protocol, mouse + keyboard).
+  espressif/usb_host_hid: "^1.0.4"
