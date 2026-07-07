@@ -1,131 +1,96 @@
 # Screen Hopper (ESP32-S3)
 
-A wireless KVM that needs no host software: one USB mouse + keyboard drives two
-computers over Bluetooth LE, and the cursor "hops" between machines by placing it
-at **absolute** on-screen coordinates. See [PRD.md](PRD.md) for the full brief and
-the milestone plan.
+A wireless KVM that needs **no software on the computers it controls**. Plug a USB
+mouse and keyboard into one small board, pair it with two computers over Bluetooth
+LE, and drive both from that single set of peripherals — moving the cursor from one
+machine to the other by pushing it off the edge of the screen.
 
-This board (ESP32-S3) was chosen for its **native USB host** capability — the one
-piece the prior Bluetooth proof-of-concept (a Pico 2 W, `../screen-hopper-bt`)
-could not do.
+The board is an **ESP32-S3-WROOM-1 N16R8** ([dev board](https://www.aliexpress.com/item/1005006418608267.html)),
+chosen because the ESP32-S3 has a native USB host controller — the one capability a
+plain Bluetooth microcontroller lacks, and the reason a wired mouse and keyboard can
+be read at all.
 
-## Status — M3: two hosts + edge-push hop
+## What it does
 
-The firmware implements **M3**: it hosts a USB mouse + keyboard (directly or
-through a hub), accumulates the mouse's relative motion into a **per-host
-absolute** virtual cursor, and re-transmits both to **up to two paired computers
-at once** as a **BLE HID (HOGP) peripheral** — a wireless KVM with **no host-side
-software**. Control follows the cursor: push it off the left/right screen edge
-and it **hops** to the adjacent machine, no disconnect/reconnect stall.
+- Hosts a real USB mouse + keyboard, directly or through a hub.
+- Presents itself to each computer as an ordinary **Bluetooth LE HID** mouse +
+  keyboard. The computers need no drivers, agents, or configuration — they just see
+  a Bluetooth input device and pair with it from their built-in Bluetooth settings.
+- Holds **two computers connected at once** and sends input to whichever one
+  currently has control.
+- **Hops** the cursor between the two machines: push the pointer off the right edge
+  of the left computer and it reappears on the right computer (and back off its left
+  edge to return) — no disconnect, no reconnect, no button to press, no stall.
 
-Both host links are held live simultaneously, so hand-off is seamless. This is
-built on the **NimBLE** host stack, which keeps HOGP notification (CCCD) state
-**per connection** — the property that lets two hosts each subscribe
-independently. (The earlier M2 build used Bluedroid, whose single shared CCCD
-value cannot support a second host; the switch to NimBLE is what makes M3
-possible, and NimBLE's built-in HOGP service builder replaces the hand-built
-attribute table.)
+The intended setup is a personal laptop and a work laptop on one desk, driven by one
+good keyboard and mouse, with the cursor crossing between them as though they were a
+single machine — without installing anything on either.
 
-Pair from each host's built-in Bluetooth — the device advertises as **"Screen
-Hopper"** (and keeps advertising while a connection slot is free), and pairing is
-"Just Works" (no PIN; it has no keypad), bonded + encrypted, persisted in NVS.
-The USB devices are read in the HID **boot** protocol (mouse: buttons + relative
-dx/dy; keyboard: modifiers + up to 6 keycodes).
+## How it works
 
-Source layout (`main/`):
+Everything hinges on **absolute pointing**. A normal mouse reports *relative* motion
+("moved 3 left, 2 up"), and the computer decides where the cursor ends up — so the
+device can never know where the cursor actually is. Screen Hopper instead maintains
+its own virtual cursor position and reports it to the computer as an **absolute**
+coordinate in a fixed logical space (0…32767 on each axis), digitizer-style. Because
+the device now *knows* where the cursor is, it can tell when the cursor has been
+pushed to the edge of one screen and place it at the matching edge of the other —
+which is what a "hop" is.
 
-- `our_descriptor.c` — the combined **absolute-pointer** mouse (report id 1: 8
-  buttons + 16-bit absolute X/Y, 0…32767) + boot keyboard (report id 2) HID
-  report map. This is the external contract the hosts pair against — unchanged
-  from M2, so no host needs to re-learn the device.
-- `ble_hid.c` — the BLE HOGP peripheral on **NimBLE**: advertising, Just-Works
-  bonding, a two-slot connection layer (one `conn_handle` + subscription state
-  per host), and per-host report senders (`ble_hid_send_mouse/keyboard(host, …)`).
-  Uses NimBLE's built-in `ble_svc_hid`/`bas`/`dis` service builders.
-- `kvm.c` — the stack-independent routing brain: the active host, a `cursor_t`
-  per host, and the edge-push hop (slot 0 = left screen, slot 1 = right).
-- `cursor.c` — the absolute cursor model: a caller-owned `cursor_t` (the KVM owns
-  one per host); accumulate relative motion into the 0…32767 space (with a
-  sensitivity gain), clamp to bounds, and report a **sustained** push past an
-  edge so the KVM can hop.
-- `usb_input.c` — the M1 USB host + HID decode, behind a callback API.
-- `screenhopper.c` — wires USB input → KVM → BLE.
+Holding both computers connected simultaneously (rather than switching between stored
+pairings) is what makes the hand-off instant: switching bonded devices costs about a
+second of reconnect lag each way, far too slow to feel like one continuous desktop.
 
-**Known limitations:**
+Input flows through four stages:
 
-- **No scroll wheel yet.** The mouse is driven in HID boot protocol, whose report
-  has no wheel byte, and our BLE descriptor has no wheel field. Adding scroll
-  needs report-protocol parsing of the mouse's own descriptor — the deferred work
-  noted under "Boot protocol only" below.
-- **One display per host.** The single logical coordinate space maps to one
-  display, so within a host the cursor can't cross to a second physical monitor
-  from the device alone (M4). Hopping is **between hosts**, not between a host's
-  own monitors.
-- **Fixed left/right host order.** Hosts are ordered by connection (slot 0 = left,
-  slot 1 = right) with no wrap-around; arranging screen positions is M4.
+1. **USB host input** (`usb_input.c`) — enumerates the mouse and keyboard in HID
+   boot protocol and decodes their reports (buttons + relative motion; modifiers + up
+   to six keycodes).
+2. **Absolute cursor model** (`cursor.c`) — accumulates the mouse's relative motion
+   into the virtual cursor, clamped to bounds, and flags when the cursor has been
+   pushed *sustainedly* past a left/right edge (a firm shove, not a fast flick).
+3. **KVM routing** (`kvm.c`) — keeps one cursor per computer, sends input to the
+   active one, and on an edge push hands control to the adjacent computer, entering
+   its screen from the opposite edge at the same height.
+4. **BLE HID peripheral** (`ble_hid.c`) — advertises and pairs as a Bluetooth LE
+   HID-over-GATT device, holds a connection to each computer, and delivers the
+   reports. It is built on the **NimBLE** host stack, which tracks each connection's
+   notification state independently — the property that lets two computers subscribe
+   to the same device at once.
 
-All are described in the PRD.
+The HID report layout (`our_descriptor.c`) is the device's external contract, proven
+to be accepted by both macOS and Windows:
 
-The console/logs come out over **UART0** (the native USB port hosts the input
-devices — see the wiring note below), e.g.:
+| Report | Fields |
+|--------|--------|
+| Mouse (id 1) | 8 buttons; 16-bit **absolute** X and Y (0…32767) |
+| Keyboard (id 2) | modifier bitmask; up to 6 concurrent keycodes; LED output (Caps/Num Lock) |
 
-```
-I (…) screenhopper: Screen Hopper (ESP32-S3) — M3: USB → absolute cursor → BLE HID KVM
-I (…) ble_hid: nimble host task started
-I (…) ble_hid: report handles: mouse=31 kbd=35
-I (…) ble_hid: advertising as "Screen Hopper" (2 slot(s) free)
-I (…) ble_hid: host connected (conn=1) -> slot 0
-I (…) ble_hid: subscribe (conn=1 attr=31 notify=1): mouse=1 kbd=0
-I (…) ble_hid: host connected (conn=2) -> slot 1
-I (…) kvm: hop 0 -> 1 (off right edge)
-```
+## Pairing and use
 
-## Toolchain
+Pair from each computer's built-in Bluetooth: the device advertises as **"Screen
+Hopper"**, and pairing is "Just Works" (no PIN — the device has no keypad), producing
+a bonded, encrypted link that persists across reboots. It keeps advertising while a
+second connection slot is free, so both computers can pair. Once both are connected,
+drive the mouse and keyboard normally and push the cursor off a screen edge to hop.
 
-Built with **ESP-IDF v5.5.4** (installed here via [`eim`](https://github.com/espressif/idf-im-cli),
-Espressif's installation manager: `eim install -t esp32s3 -i v5.5.4`). v5.5 is
-required for reliable low-speed-behind-a-hub USB hosting (v5.4 crashed on hub
-enumeration glitches).
+The first computer to connect is the **left** screen, the second is the **right**;
+there is no wrap-around.
 
-Activate the environment in each new shell before running `idf.py`:
+## Current limitations
 
-```fish
-# fish (this machine's shell)
-source ~/.espressif/tools/activate_idf_v5.5.4.fish
-```
+- **No scroll wheel.** The mouse is read in HID boot protocol, which has no wheel
+  byte, and the BLE report has no wheel field. Scroll needs report-protocol parsing
+  of the mouse's own descriptor.
+- **One display per computer.** The single logical coordinate space maps to one
+  display, so within a computer the cursor can't cross onto a second physical
+  monitor from the device alone. Hopping is *between computers*, not between a
+  computer's own monitors.
+- **Fixed left/right order.** Computers are ordered by connection, with no way yet to
+  arrange their screen positions.
 
-```sh
-# bash / zsh
-source ~/.espressif/tools/activate_idf_v5.5.4.sh
-```
+## Building
 
-The `espressif/usb_host_hid` USB HID class driver (resolved to 1.2.0) is pulled
-automatically by the component manager on first build — see `main/idf_component.yml`.
-
-## Build, flash, monitor
-
-```sh
-idf.py set-target esp32s3      # first time only; already done in this tree
-idf.py build
-idf.py -p <PORT> flash monitor
-```
-
-`<PORT>` is the dev-kit's **UART** port (see the wiring note below), e.g.
-`/dev/cu.usbserial-*` on macOS.
-
-## Hardware notes (read before wiring)
-
-- **Two ports, two jobs.** On the ESP32-S3 the native USB controller and the
-  USB-Serial-JTAG console **share the same D+/D- pins (GPIO19/20)** — you can only
-  use one at a time. M1 dedicates the native USB port to *hosting* the mouse and
-  keyboard, so the console/logs come out over **UART0** instead (`sdkconfig`
-  already sets `CONFIG_ESP_CONSOLE_UART_DEFAULT`). On a dual-USB dev-kit, flash and
-  monitor over the **UART bridge** port, and reserve the **native USB (OTG)** port
-  for the input devices.
-- **VBUS / 5 V.** A hosted USB device needs 5 V on the port's VBUS pin. Many S3
-  dev-kits do not drive VBUS on the OTG port by default; you may need to supply 5 V
-  to the device (a powered hub, or the board's 5 V rail) and share ground.
-- **Boot protocol only, for now.** M1 accepts devices that expose a HID boot
-  interface (nearly all standard mice/keyboards, including unifying/Bolt-style
-  receivers). Reading a device's own report descriptor — needed for wheels, extra
-  buttons, and NKRO — comes with a later milestone.
+Firmware is built with ESP-IDF v5.5.4. See [CLAUDE.md](CLAUDE.md) for the full build,
+flash, and log-capture workflow, the hardware wiring constraints, and the Bluetooth
+implementation notes.

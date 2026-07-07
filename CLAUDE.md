@@ -1,0 +1,160 @@
+# Screen Hopper — developer notes
+
+ESP32-S3 firmware for a no-host-software wireless KVM: USB mouse + keyboard in, BLE
+HID out to **two computers at once**, cursor hops between them by absolute
+positioning. See [README.md](README.md) for what it does and the architecture; this
+file is the build workflow, the hardware constraints, and the Bluetooth gotchas we
+hit so they don't have to be rediscovered.
+
+## Build & flash
+
+ESP-IDF **v5.5.4**, installed via `eim` (Espressif's installer). The environment
+must be activated before any `idf.py` — source the script matching the shell that
+actually runs the command:
+
+```sh
+# bash (the shell Claude's Bash tool runs)
+source ~/.espressif/tools/activate_idf_v5.5.4.sh && idf.py build
+```
+```fish
+# fish (Tamlyn's interactive shell)
+source ~/.espressif/tools/activate_idf_v5.5.4.fish
+```
+
+- **Flash** over the UART-bridge port (see hardware constraints — *not* the native
+  USB port): `idf.py -p /dev/cu.usbmodem5C843191521 flash`.
+- **Config changes need a clean regen.** Editing `sdkconfig.defaults` does *not*
+  update an existing `sdkconfig`; the defaults are only applied when `sdkconfig` is
+  generated. Run `rm sdkconfig && idf.py build`.
+- `idf.py` becomes a shell function after activation, so `timeout idf.py …` fails —
+  call `python "$IDF_PATH/tools/idf.py"` if you need to wrap it.
+
+## Reading logs
+
+`idf.py monitor` needs a TTY and won't run from Claude's Bash tool
+("requires standard input to be attached to TTY"). Read UART0 directly with pyserial
+(bundled with esptool, on PATH after activation): open the port at 115200, pulse RTS
+(EN) to reset the chip, then read for a fixed window. Logs are on **UART0** because
+the native USB port hosts the input devices. To watch a *live* session without
+dropping its connections, open the port holding RTS/DTR deasserted (no reset) instead
+of pulsing.
+
+## Clearing bonds (and the mandatory host-side step)
+
+`idf.py -p <port> erase-flash` wipes the whole chip including the NVS partition (all
+bonds), then `idf.py -p <port> flash` reinstalls. **After erasing the device you must
+also "forget" it on every computer it was paired with** — otherwise each host keeps
+auto-reconnecting with keys the device no longer has (see gotcha #4).
+
+## Hardware constraints
+
+The board is a 44-pin **ESP32-S3-WROOM-1 N16R8** dev board
+([AliExpress listing](https://www.aliexpress.com/item/1005006418608267.html)):
+16 MB flash, 8 MB PSRAM, dual USB-C (one native USB-OTG, one UART bridge via a WCH
+**CH9102**, VID `0x1a86`, enumerating at `/dev/cu.usbmodem5C843191521`).
+
+- **Two USB ports, two jobs.** On the S3 the native USB controller and the
+  USB-Serial-JTAG console share the same D+/D- pins (GPIO19/20) — only one can be used
+  at a time. The native port hosts the mouse + keyboard, so the console goes out over
+  **UART0** (`CONFIG_ESP_CONSOLE_UART_DEFAULT`). Flash and read logs over the dev-kit's
+  **UART-bridge** port; reserve native USB (OTG) for the input devices.
+- **OTG VBUS solder jumper.** The dev board did not drive 5 V on the OTG port's VBUS
+  by default, so hosted devices got no power and never enumerated (silent — no
+  errors). The two "USB-OTG" pads on the back were bridged with solder to connect the
+  5 V rail to VBUS. If USB hosting ever stops working (devices don't power up), check
+  that joint first. Side effect: the OTG port now always sources 5 V, so don't plug
+  the board into a PC as a USB *device* via that port (two 5 V sources would fight).
+- **USB hub support needs ESP-IDF ≥ 5.5.** v5.4's experimental external-hub code
+  asserted and reboot-looped on hub enumeration glitches; v5.5 makes low-speed
+  devices behind a hub supported. That's why the project is pinned to v5.5.4.
+
+## BLE stack
+
+Host stack is **NimBLE**, not Bluedroid. NimBLE tracks CCCD (notification-enabled)
+state **per connection**, which is what lets two hosts each subscribe independently;
+Bluedroid keeps one shared CCCD value across connections and cannot. NimBLE also ships
+built-in HOGP service builders (`ble_svc_hid` / `ble_svc_bas` / `ble_svc_dis`), so we
+don't hand-build the GATT attribute table. `esp_hid`'s device layer is single-host on
+*both* stacks ("there can be only one BLE HID device"), so the connection/send layer
+in `ble_hid.c` is ours regardless.
+
+The HID report map in `our_descriptor.c` is the **external contract** the hosts pair
+against (mouse report id 1 with absolute X/Y; keyboard report id 2). It is proven on
+macOS + Windows — don't change it without re-testing both.
+
+## BLE gotchas (read before touching `ble_hid.c` or the BLE `sdkconfig`)
+
+Every one of these cost real debugging time. They interact, and several only show up
+on macOS or only with two hosts.
+
+1. **macOS needs encryption-gated characteristics — `CONFIG_BT_NIMBLE_SM_LVL=2`.**
+   HOGP requires the HID characteristics to demand encryption. macOS enforces it: it
+   only *starts* pairing when it hits an "insufficient encryption" error accessing a
+   characteristic. At the default level 0 the reports are readable in the clear, so
+   macOS connects, discovers, subscribes — and never bonds, leaving its Bluetooth UI
+   spinning forever. Windows tolerates level 0; macOS does not. Level 2 requires
+   encryption *without* authentication, so the keypad-less Just Works pairing still
+   satisfies it.
+
+2. **Bond/CCCD store overflow silently unpairs a live host.** Each bonded host stores
+   4 CCCDs (service-changed, battery, mouse report, keyboard report). The NimBLE
+   defaults (3 bonds / 8 CCCDs) sit *exactly* at two hosts' worth. When the store
+   overflows, `ble_store_util_status_rr` deletes the **oldest** peer — so one stray
+   third pairing (e.g. re-pairing a host under a new identity address) evicts a real
+   host's bond behind its back. That host keeps *its* keys, fails encryption on
+   reconnect, and looks mysteriously dead until removed and re-paired. Fixed with
+   `CONFIG_BT_NIMBLE_MAX_BONDS=4` and `CONFIG_BT_NIMBLE_MAX_CCCDS=16`.
+
+3. **CONNECT arrives late — allocate per-connection state on first sight of a conn
+   handle, not in the CONNECT handler.** This NimBLE fork defers the app-level
+   `BLE_GAP_EVENT_CONNECT` behind a remote version/feature HCI exchange, so a bonded
+   host's `ENC_CHANGE` and CCCD-restore `SUBSCRIBE` events land ~60 ms *before*
+   CONNECT. `slot_find_or_alloc()` allocates a slot for any event naming a conn handle
+   so restored subscriptions aren't dropped. Exception: a `SUBSCRIBE` with
+   reason `TERM` fires during teardown — never allocate for it.
+
+4. **Stale-bond reconnect loop after wiping the device.** If the device's bonds are
+   erased but a host still has its bond, the host auto-reconnects with keys the device
+   no longer has: `encryption change status=7` (`BLE_HS_ENOTCONN`), then disconnect
+   `reason=531` (HCI 0x13, remote terminated), looping ~1.4×/sec. With two stale hosts
+   the reconnect storm also crowds out any fresh pairing. Fix: **forget the device on
+   every host**, one at a time — turn the *other* host's Bluetooth off so its storm
+   doesn't interfere — then pair fresh. Success in the log looks like
+   `status=0 encrypted=1 bonded=1` followed by `subscribe … mouse=1 kbd=1`.
+
+5. **Advertising while connected works.** Restart advertising in the CONNECT handler
+   whenever a slot is still free, so a second host can find us — NimBLE stops
+   advertising when a connection forms. (This works reliably here; no need for the
+   deferred-restart-task pattern some multi-connection examples use.)
+
+6. **Report value handles are captured by registration order** in
+   `gatt_svr_register_cb` — the report characteristics all share UUID 0x2A4D, and
+   register in the order they're listed in `params.rpts[]`: 0 = mouse input, 1 =
+   keyboard input, 2 = keyboard LED output. Asserted non-zero at host sync.
+
+7. **NimBLE log spam.** At INFO level NimBLE logs one line per notification, flooding
+   UART0 on every mouse move. Pinned to WARNING (`CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING`);
+   our own `ble_hid` / `kvm` INFO logs still show.
+
+## Observing BLE from the dev Mac
+
+The Mac running the toolchain is also one of the two KVM hosts, so both ends of a BLE
+problem are observable locally:
+
+- **Is the device advertising?** A short Swift CoreBluetooth scanner (`swift
+  scan.swift`, needs Bluetooth TCC — run outside the sandbox) sees the "Screen Hopper"
+  advert within seconds. Ground truth when the firmware's "advertising" log is in
+  doubt.
+- **Is the Mac bonded/connected?** `system_profiler SPBluetoothDataType` lists Screen
+  Hopper (address `68:EE:8F:63:97:32`) under Connected / Not Connected.
+
+## Source layout (`main/`)
+
+| File | Role |
+|------|------|
+| `screenhopper.c` | app entry; wires USB input → KVM |
+| `usb_input.c` | USB host + HID boot-protocol decode (mouse + keyboard via hub) |
+| `cursor.c` | absolute cursor model; sustained edge-push detection |
+| `kvm.c` | active-host routing + edge-push hop (slot 0 = left, slot 1 = right) |
+| `ble_hid.c` | NimBLE HOGP peripheral: advertising, bonding, 2-slot connection layer, per-host report senders |
+| `our_descriptor.c` | HID report map — the external contract |
