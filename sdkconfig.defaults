@@ -33,6 +33,31 @@ CONFIG_BT_NIMBLE_MAX_CONNECTIONS=2
 # (PRD FR6). Off by default in NimBLE.
 CONFIG_BT_NIMBLE_NVS_PERSIST=y
 
+# Headroom in the bond/CCCD stores. The defaults (3 bonds, 8 CCCDs) sit exactly
+# at two hosts' worth of persisted state — each bonded host stores 4 CCCDs
+# (service-changed, battery, mouse report, keyboard report) — and NimBLE's
+# response to an overflowing store is to silently unpair the oldest peer
+# (ble_store_util_status_rr). One stray re-pair under a new host identity is
+# then enough to delete a live host's bond behind its back; that host keeps its
+# own keys, fails encryption on reconnect, and looks mysteriously dead until
+# re-paired. Doubling the CCCD store and one spare bond keeps a transient third
+# pairing from evicting a real one.
+CONFIG_BT_NIMBLE_MAX_BONDS=4
+CONFIG_BT_NIMBLE_MAX_CCCDS=16
+
+# Quieten the NimBLE host: at the default INFO level it logs one line per report
+# notification, which floods UART0 (our only console) whenever the mouse moves.
+CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
+
+# Require encryption on the HID service characteristics (Security Mode 1 Level 2).
+# HOGP mandates this, and macOS enforces it: it only initiates pairing when it
+# hits an "insufficient encryption" error accessing a characteristic. At the
+# default level 0 the reports are readable in the clear, so macOS connects,
+# subscribes, but never bonds — its Bluetooth UI then spins forever. Level 2 adds
+# encryption without authentication, so our keypad-less Just Works pairing still
+# satisfies it. (Windows tolerates level 0; macOS does not.)
+CONFIG_BT_NIMBLE_SM_LVL=2
+
 # Give the app a larger partition and keep an NVS partition for the bonds (the
 # 16MB flash has ample room).
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y

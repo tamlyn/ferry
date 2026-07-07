@@ -90,15 +90,25 @@ static host_slot_t *slot_by_conn(uint16_t conn_handle)
     return NULL;
 }
 
-static int alloc_slot(uint16_t conn_handle)
+// Find the connection's slot, allocating one on first sight. Events for a new
+// connection do not begin with BLE_GAP_EVENT_CONNECT on this NimBLE fork: the
+// host defers it behind a remote version/feature exchange, so a bonded peer's
+// ENC_CHANGE — and the SUBSCRIBE events restoring its persisted CCCDs — arrive
+// first. Keying allocation off any event that names the connection means those
+// restored subscriptions land in the slot instead of being dropped.
+static host_slot_t *slot_find_or_alloc(uint16_t conn_handle)
 {
+    host_slot_t *s = slot_by_conn(conn_handle);
+    if (s) {
+        return s;
+    }
     for (int i = 0; i < BLE_HID_MAX_HOSTS; i++) {
         if (!s_hosts[i].in_use) {
             s_hosts[i] = (host_slot_t){ .in_use = true, .conn_handle = conn_handle };
-            return i;
+            return &s_hosts[i];
         }
     }
-    return -1;
+    return NULL;
 }
 
 static int free_slots(void)
@@ -167,16 +177,39 @@ static void advertise_if_slot_free(void)
 
 // ---- GAP events -----------------------------------------------------------
 
+// Log the link's negotiated connection parameters — the interval bounds how
+// often we can deliver reports, so it's the first thing to check when cursor
+// motion stutters.
+static void log_conn_params(const char *when, uint16_t conn_handle)
+{
+    struct ble_gap_conn_desc desc;
+    if (ble_gap_conn_find(conn_handle, &desc) != 0) {
+        return;
+    }
+    unsigned itvl_us = desc.conn_itvl * 1250;
+    ESP_LOGI(TAG, "%s (conn=%d): interval=%u.%02ums latency=%u timeout=%ums",
+             when, conn_handle, itvl_us / 1000, (itvl_us % 1000) / 10,
+             desc.conn_latency, desc.supervision_timeout * 10);
+}
+
 static int ble_gap_event(struct ble_gap_event *event, void *arg)
 {
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
-            int slot = alloc_slot(event->connect.conn_handle);
+            host_slot_t *s = slot_find_or_alloc(event->connect.conn_handle);
             ESP_LOGI(TAG, "host connected (conn=%d) -> slot %d",
-                     event->connect.conn_handle, slot);
+                     event->connect.conn_handle, s ? (int)(s - s_hosts) : -1);
+            log_conn_params("conn params", event->connect.conn_handle);
         } else {
             ESP_LOGW(TAG, "connect failed; status=%d", event->connect.status);
+            // A connection that dies during establishment gets a failed CONNECT
+            // instead of a DISCONNECT, but its earlier enc/subscribe events may
+            // already have claimed a slot — release it or it leaks.
+            host_slot_t *s = slot_by_conn(event->connect.conn_handle);
+            if (s) {
+                *s = (host_slot_t){0};
+            }
         }
         // NimBLE stops advertising on connect; restart if a slot remains free so
         // a second host can find us.
@@ -195,7 +228,11 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
     }
 
     case BLE_GAP_EVENT_SUBSCRIBE: {
-        host_slot_t *s = slot_by_conn(event->subscribe.conn_handle);
+        // TERM fires while the connection is being torn down — never allocate
+        // for it; the slot (if any) is about to be freed by DISCONNECT.
+        host_slot_t *s = (event->subscribe.reason == BLE_GAP_SUBSCRIBE_REASON_TERM)
+                             ? slot_by_conn(event->subscribe.conn_handle)
+                             : slot_find_or_alloc(event->subscribe.conn_handle);
         if (s) {
             if (event->subscribe.attr_handle == s_mouse_val_handle) {
                 s->mouse_sub = event->subscribe.cur_notify;
@@ -210,6 +247,9 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
     }
 
     case BLE_GAP_EVENT_ENC_CHANGE: {
+        if (event->enc_change.status == 0) {
+            slot_find_or_alloc(event->enc_change.conn_handle);
+        }
         struct ble_gap_conn_desc desc;
         int rc = ble_gap_conn_find(event->enc_change.conn_handle, &desc);
         ESP_LOGI(TAG, "encryption change (conn=%d): status=%d encrypted=%d bonded=%d",
@@ -218,6 +258,10 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
                  rc == 0 ? desc.sec_state.bonded : -1);
         return 0;
     }
+
+    case BLE_GAP_EVENT_CONN_UPDATE:
+        log_conn_params("conn params updated", event->conn_update.conn_handle);
+        return 0;
 
     case BLE_GAP_EVENT_REPEAT_PAIRING: {
         // The host lost its bond but is re-pairing. Drop the stale bond and let
@@ -414,7 +458,18 @@ esp_err_t ble_hid_send_mouse(int host, uint8_t buttons, uint16_t x, uint16_t y)
     }
     // NimBLE frees om, and only puts it on the wire for this conn if it subscribed.
     int rc = ble_gatts_notify_custom(s->conn_handle, s_mouse_val_handle, om);
-    return rc == 0 ? ESP_OK : ESP_FAIL;
+    if (rc != 0) {
+        // Dropped reports are invisible to the user beyond a stutter (the
+        // position is absolute, so the next report corrects it) — count them
+        // and log sparsely so a starving link shows up in the console.
+        static unsigned drops;
+        if ((++drops & 0x7F) == 1) {
+            ESP_LOGW(TAG, "mouse notify failed (conn=%d rc=%d, %u drops total)",
+                     s->conn_handle, rc, drops);
+        }
+        return ESP_FAIL;
+    }
+    return ESP_OK;
 }
 
 esp_err_t ble_hid_send_keyboard(int host, uint8_t modifiers, const uint8_t keys[6])
