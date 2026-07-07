@@ -1,266 +1,50 @@
-// Screen Hopper (ESP32-S3) — M1: USB host read.
+// Screen Hopper (ESP32-S3) — M2: USB input → absolute cursor → BLE HID.
 //
-// This milestone proves the reason the project moved to the ESP32-S3: the board
-// can act as a USB host, enumerate a real mouse and keyboard, and decode their
-// input reports. There is no BLE and no absolute-cursor model here yet — those
-// arrive in M2. All this firmware does is host HID devices and log what they send.
-//
-// Devices are driven in the HID *boot* protocol: a mouse gives 8-bit relative
-// dx/dy + buttons, a keyboard gives modifiers + up to six keycodes. That is all
-// M1 needs. Report-protocol parsing of a device's own HID descriptor (needed for
-// wheels, extra buttons, NKRO) is deferred to a later milestone.
+// The single-host bridge: a USB mouse and keyboard (via a hub) are hosted, the
+// mouse's relative motion is accumulated into an absolute virtual cursor, and
+// both are re-transmitted to one paired computer as a BLE HID peripheral — full
+// pointer + keyboard control with no host-side software.
 
-#include <stdbool.h>
-#include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/queue.h"
-
-#include "esp_err.h"
-#include "esp_intr_alloc.h"
 #include "esp_log.h"
+#include "nvs_flash.h"
 
-#include "usb/usb_host.h"
-#include "usb/hid_host.h"
-#include "usb/hid_usage_keyboard.h"
-#include "usb/hid_usage_mouse.h"
+#include "ble_hid.h"
+#include "cursor.h"
+#include "usb_input.h"
 
 static const char *TAG = "screenhopper";
 
-// The HID host driver reports device connections from its own background task.
-// We hand those off to app_main via a queue so that opening/starting a device
-// (which issues USB control transfers) happens outside the driver's callback.
-typedef struct {
-    hid_host_device_handle_t handle;
-    hid_host_driver_event_t  event;
-} app_event_t;
-
-static QueueHandle_t app_event_queue = NULL;
-
-static const char *proto_name(uint8_t proto)
+// A USB mouse report: move the virtual cursor by the relative delta and send its
+// new absolute position (plus button state) to the host.
+static void on_mouse(uint8_t buttons, int dx, int dy)
 {
-    switch (proto) {
-    case HID_PROTOCOL_KEYBOARD: return "keyboard";
-    case HID_PROTOCOL_MOUSE:    return "mouse";
-    default:                    return "generic HID";
-    }
+    cursor_apply_delta(dx, dy);
+    ble_hid_send_mouse(buttons, cursor_x(), cursor_y());
 }
 
-// ---------------------------------------------------------------- decoding
-
-static void log_mouse_report(const uint8_t *data, size_t len)
+// A USB keyboard report: pass the modifiers + keycodes straight through.
+static void on_keyboard(uint8_t modifiers, const uint8_t keys[6])
 {
-    if (len < sizeof(hid_mouse_input_report_boot_t)) {
-        return;
-    }
-    const hid_mouse_input_report_boot_t *r =
-        (const hid_mouse_input_report_boot_t *)data;
-
-    ESP_LOGI(TAG, "mouse   [%c%c%c] dx=%4d dy=%4d",
-             r->buttons.button1 ? 'L' : '.',
-             r->buttons.button2 ? 'R' : '.',
-             r->buttons.button3 ? 'M' : '.',
-             r->x_displacement, r->y_displacement);
-}
-
-// Translate a HID keyboard usage code to a printable character, or 0 if we
-// don't have a mapping (those are shown as [XX] hex instead).
-static char keycode_to_ascii(uint8_t code, bool shift)
-{
-    if (code >= 0x04 && code <= 0x1D) {           // a..z
-        char c = 'a' + (code - 0x04);
-        return shift ? (char)(c - 'a' + 'A') : c;
-    }
-    if (code >= 0x1E && code <= 0x26) return '1' + (code - 0x1E);  // 1..9
-    if (code == 0x27) return '0';
-    if (code == 0x2C) return ' ';
-    return 0;
-}
-
-static void log_keyboard_report(const uint8_t *data, size_t len)
-{
-    if (len < sizeof(hid_keyboard_input_report_boot_t)) {
-        return;
-    }
-    const hid_keyboard_input_report_boot_t *r =
-        (const hid_keyboard_input_report_boot_t *)data;
-
-    const uint8_t mod = r->modifier.val;
-    const bool shift = mod & 0x22;   // bit1 = left shift, bit5 = right shift
-
-    char keys[64];
-    size_t n = 0;
-    for (int i = 0; i < 6 && n + 4 < sizeof(keys); i++) {
-        const uint8_t code = r->key[i];
-        if (code == 0) {
-            continue;
-        }
-        const char c = keycode_to_ascii(code, shift);
-        if (c) {
-            keys[n++] = c;
-        } else {
-            n += snprintf(keys + n, sizeof(keys) - n, "[%02X]", code);
-        }
-    }
-    keys[n] = '\0';
-
-    ESP_LOGI(TAG, "keyboard mod=0x%02X keys=\"%s\"", mod, keys);
-}
-
-// ---------------------------------------------------------------- callbacks
-
-// Per-interface events for an opened device: input reports and disconnects.
-static void hid_host_interface_callback(hid_host_device_handle_t handle,
-                                        const hid_host_interface_event_t event,
-                                        void *arg)
-{
-    (void)arg;
-    hid_host_dev_params_t params;
-    ESP_ERROR_CHECK(hid_host_device_get_params(handle, &params));
-
-    switch (event) {
-    case HID_HOST_INTERFACE_EVENT_INPUT_REPORT: {
-        uint8_t data[64];
-        size_t len = 0;
-        ESP_ERROR_CHECK(hid_host_device_get_raw_input_report_data(
-            handle, data, sizeof(data), &len));
-
-        if (params.proto == HID_PROTOCOL_MOUSE) {
-            log_mouse_report(data, len);
-        } else if (params.proto == HID_PROTOCOL_KEYBOARD) {
-            log_keyboard_report(data, len);
-        }
-        break;
-    }
-    case HID_HOST_INTERFACE_EVENT_DISCONNECTED:
-        ESP_LOGI(TAG, "%s disconnected", proto_name(params.proto));
-        ESP_ERROR_CHECK(hid_host_device_close(handle));
-        break;
-    case HID_HOST_INTERFACE_EVENT_TRANSFER_ERROR:
-        ESP_LOGW(TAG, "%s transfer error", proto_name(params.proto));
-        break;
-    default:
-        ESP_LOGW(TAG, "unhandled interface event %d", event);
-        break;
-    }
-}
-
-// A new device was connected. We only host boot-protocol mice and keyboards, so
-// ignore every other HID interface — a keyboard's extra media-key interface, a
-// mouse's vendor interface, a joystick. Besides being undecodable here, claiming
-// them ties up the ESP32-S3's limited USB host channels on pipes we never read,
-// which is exactly what starves a second device sharing a hub.
-//
-// A device we cannot drive — an unsupported low-speed device, a quirky one that
-// stalls a control transfer — must not take down the host: we log and skip just
-// that device rather than aborting the whole board.
-static void handle_device_connected(hid_host_device_handle_t handle)
-{
-    hid_host_dev_params_t params;
-    ESP_ERROR_CHECK(hid_host_device_get_params(handle, &params));
-
-    if (params.proto != HID_PROTOCOL_KEYBOARD && params.proto != HID_PROTOCOL_MOUSE) {
-        ESP_LOGI(TAG, "ignoring %s interface", proto_name(params.proto));
-        return;
-    }
-    ESP_LOGI(TAG, "%s connected", proto_name(params.proto));
-
-    const hid_host_device_config_t dev_config = {
-        .callback = hid_host_interface_callback,
-        .callback_arg = NULL,
-    };
-    esp_err_t err = hid_host_device_open(handle, &dev_config);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "cannot open %s: %s", proto_name(params.proto), esp_err_to_name(err));
-        return;
-    }
-
-    // The device is open now, so every later failure must close it before
-    // bailing out, or the handle leaks and the port never re-enumerates cleanly.
-    if (params.sub_class == HID_SUBCLASS_BOOT_INTERFACE) {
-        err = hid_class_request_set_protocol(handle, HID_REPORT_PROTOCOL_BOOT);
-        if (err == ESP_OK && params.proto == HID_PROTOCOL_KEYBOARD) {
-            err = hid_class_request_set_idle(handle, 0, 0);
-        }
-    } else {
-        ESP_LOGW(TAG, "device has no boot interface; M1 only decodes boot reports");
-    }
-
-    if (err == ESP_OK) {
-        err = hid_host_device_start(handle);
-    }
-
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "cannot start %s: %s", proto_name(params.proto), esp_err_to_name(err));
-        hid_host_device_close(handle);
-    }
-}
-
-// Runs in the HID host driver's background task — keep it light: just forward
-// the connection event to app_main.
-static void hid_host_device_callback(hid_host_device_handle_t handle,
-                                     const hid_host_driver_event_t event,
-                                     void *arg)
-{
-    (void)arg;
-    const app_event_t evt = { .handle = handle, .event = event };
-    xQueueSend(app_event_queue, &evt, 0);
-}
-
-// ---------------------------------------------------------------- USB daemon
-
-// Owns the USB host library: installs it, then pumps its event loop forever.
-static void usb_lib_task(void *arg)
-{
-    const usb_host_config_t host_config = {
-        .skip_phy_setup = false,
-        .intr_flags = ESP_INTR_FLAG_LOWMED,
-    };
-    ESP_ERROR_CHECK(usb_host_install(&host_config));
-    xTaskNotifyGive((TaskHandle_t)arg);   // tell app_main the host is up
-
-    while (true) {
-        uint32_t event_flags;
-        usb_host_lib_handle_events(portMAX_DELAY, &event_flags);
-        if (event_flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
-            ESP_ERROR_CHECK(usb_host_device_free_all());
-        }
-    }
+    ble_hid_send_keyboard(modifiers, keys);
 }
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Screen Hopper (ESP32-S3) — M1 USB host read");
+    ESP_LOGI(TAG, "Screen Hopper (ESP32-S3) — M2: USB → absolute cursor → BLE HID");
 
-    app_event_queue = xQueueCreate(10, sizeof(app_event_t));
-    assert(app_event_queue != NULL);
-
-    BaseType_t created = xTaskCreatePinnedToCore(
-        usb_lib_task, "usb_lib", 4096, xTaskGetCurrentTaskHandle(), 2, NULL, 0);
-    assert(created == pdTRUE);
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);   // wait for usb_host_install()
-
-    const hid_host_driver_config_t hid_host_config = {
-        .create_background_task = true,
-        .task_priority = 5,
-        .stack_size = 4096,
-        .core_id = 0,
-        .callback = hid_host_device_callback,
-        .callback_arg = NULL,
-    };
-    ESP_ERROR_CHECK(hid_host_install(&hid_host_config));
-
-    ESP_LOGI(TAG, "ready — plug in a USB mouse or keyboard");
-
-    app_event_t evt;
-    while (true) {
-        if (xQueueReceive(app_event_queue, &evt, portMAX_DELAY)) {
-            if (evt.event == HID_HOST_DRIVER_EVENT_CONNECTED) {
-                handle_device_connected(evt.handle);
-            }
-        }
+    // NVS holds the BLE bonding keys, so paired hosts reconnect without re-pairing.
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
     }
+    ESP_ERROR_CHECK(ret);
+
+    cursor_reset();
+    ESP_ERROR_CHECK(ble_hid_init());
+    ESP_ERROR_CHECK(usb_input_start(on_mouse, on_keyboard));
+
+    ESP_LOGI(TAG, "ready — pair with a host, then drive the USB mouse and keyboard");
 }

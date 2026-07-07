@@ -13,3 +13,15 @@ CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 # basic wired mice and keyboards — are supported out of the box as of ESP-IDF
 # v5.5; on v5.4 that needed experimental flags and crashed on enumeration errors.
 CONFIG_USB_HOST_HUBS_SUPPORTED=y
+
+# Bluetooth: we present as a BLE HID-over-GATT peripheral (mouse + keyboard) via
+# the Bluedroid host stack. BLE only — no Classic BT — so the controller runs in
+# BLE mode and we reclaim the Classic-BT memory at startup.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=y
+CONFIG_BT_BLE_ENABLED=y
+CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
+
+# Bluedroid roughly doubles the binary, so give the app a larger partition (the
+# 16MB flash has ample room; this layout keeps an NVS partition for the bonds).
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y

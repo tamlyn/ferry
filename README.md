@@ -9,26 +9,57 @@ This board (ESP32-S3) was chosen for its **native USB host** capability — the 
 piece the prior Bluetooth proof-of-concept (a Pico 2 W, `../screen-hopper-bt`)
 could not do.
 
-## Status — M1: USB host read
+## Status — M2: single-host BLE bridge
 
-The firmware currently implements **M1 only**: it acts as a USB host, enumerates a
-mouse and/or keyboard, and logs the decoded input. No BLE, no absolute-cursor
-model yet — M1 exists to prove the board can host real HID devices. Devices are
-read in the HID **boot** protocol (mouse: buttons + 8-bit dx/dy; keyboard:
-modifiers + up to 6 keycodes).
+The firmware implements **M2**: it hosts a USB mouse + keyboard (directly or
+through a hub), accumulates the mouse's relative motion into an **absolute**
+virtual cursor, and re-transmits both to one paired computer as a **BLE HID
+(HOGP) peripheral** — full pointer + keyboard control with **no host-side
+software**. Verified placing the cursor at absolute screen coordinates on
+**macOS and Windows**, and bonds persist across power cycles (paired hosts
+reconnect automatically).
 
-Expected serial output once a device is plugged in:
+Pair from the host's built-in Bluetooth — the device advertises as **"Screen
+Hopper"**, and pairing is "Just Works" (no PIN; it has no keypad). The USB
+devices are read in the HID **boot** protocol (mouse: buttons + relative dx/dy;
+keyboard: modifiers + up to 6 keycodes).
+
+Source layout (`main/`):
+
+- `our_descriptor.c` — the combined **absolute-pointer** mouse (report id 1: 8
+  buttons + 16-bit absolute X/Y, 0…32767) + boot keyboard (report id 2) HID
+  report map. This is the external contract the hosts pair against.
+- `ble_hid.c` — the BLE HOGP peripheral (Bluedroid + `esp_hid`): advertising,
+  bonding, and the mouse/keyboard report senders.
+- `cursor.c` — the absolute cursor model: accumulate relative motion into the
+  0…32767 space (with a sensitivity gain) and clamp to bounds.
+- `usb_input.c` — the M1 USB host + HID decode, behind a callback API.
+- `screenhopper.c` — wires USB input → cursor → BLE.
+
+**Known limitations:**
+
+- **No scroll wheel yet.** The mouse is driven in HID boot protocol, whose report
+  has no wheel byte, and our BLE descriptor has no wheel field. Adding scroll
+  needs report-protocol parsing of the mouse's own descriptor — the deferred work
+  noted under "Boot protocol only" below.
+- **One display only.** The single logical coordinate space maps to one display,
+  so the cursor can't cross to a second physical monitor from the device alone
+  (M4).
+- **One host at a time.** Holding two hosts at once and hopping between them is M3.
+
+All are described in the PRD.
+
+The console/logs come out over **UART0** (the native USB port hosts the input
+devices — see the wiring note below), e.g.:
 
 ```
-I (…) screenhopper: ready — plug in a USB mouse or keyboard
-I (…) screenhopper: mouse connected
-I (…) screenhopper: mouse   [L..] dx=  -3 dy=   1
-I (…) screenhopper: keyboard connected
-I (…) screenhopper: keyboard mod=0x02 keys="Hello"
+I (…) screenhopper: Screen Hopper (ESP32-S3) — M2: USB → absolute cursor → BLE HID
+I (…) ble_hid: HID stack started, advertising
+I (…) ble_hid: host connected
+I (…) ble_hid: bonded and encrypted — ready to send input
+I (…) usb_input: mouse connected
+I (…) usb_input: keyboard connected
 ```
-
-Later milestones (M2 single-host BLE bridge with the absolute-pointer descriptor,
-M3 two hosts + hop) are described in the PRD.
 
 ## Toolchain
 
