@@ -1,210 +1,439 @@
+// BLE HID-over-GATT peripheral on the NimBLE host stack, holding up to two live
+// host connections at once (a two-machine KVM).
+//
+// Why NimBLE rather than Bluedroid: HOGP CCCD (notification-enabled) state must
+// be tracked *per connection* for two hosts to each subscribe independently.
+// NimBLE does this by construction; Bluedroid keeps one shared CCCD value, so a
+// second host reads back the first's "enabled" state and never subscribes. We
+// also lean on NimBLE's built-in HOGP service builder (ble_svc_hid) instead of
+// hand-building the attribute table.
+//
+// esp_hid's device layer is single-host on both stacks ("there can be only one
+// BLE HID device"), so the connection/send layer here is our own regardless.
+
 #include "ble_hid.h"
 
+#include <assert.h>
 #include <string.h>
 
-#include "esp_check.h"
 #include "esp_log.h"
 
-#include "esp_bt.h"
-#include "esp_bt_defs.h"
-#include "esp_bt_main.h"
-#include "esp_gap_ble_api.h"
-#include "esp_gatts_api.h"
-
-#include "esp_hidd.h"
-#include "esp_hidd_gatts.h"
-#include "esp_hid_common.h"
+#include "nimble/nimble_port.h"
+#include "nimble/nimble_port_freertos.h"
+#include "host/ble_hs.h"
+#include "host/ble_gap.h"
+#include "host/ble_store.h"
+#include "host/util/util.h"
+#include "services/gap/ble_svc_gap.h"
+#include "services/gatt/ble_svc_gatt.h"
+#include "services/bas/ble_svc_bas.h"
+#include "services/dis/ble_svc_dis.h"
+#include "services/hid/ble_svc_hid.h"
 
 #include "our_descriptor.h"
 
 static const char *TAG = "ble_hid";
 
-static esp_hidd_dev_t *s_hid_dev = NULL;
+#define DEVICE_NAME "Screen Hopper"
 
-// Set once the link is encrypted, cleared on disconnect. Input reports sent
-// before encryption are ignored by the host, so gate every send on this.
-static volatile bool s_encrypted = false;
+// HID appearance (0x03C0 = HID Generic), advertised so hosts recognise us as a
+// combined mouse+keyboard HID peripheral.
+#define HID_APPEARANCE 0x03C0
 
-static esp_hid_raw_report_map_t s_report_maps[] = {
-    { .data = our_report_descriptor, .len = 0 /* filled in at init */ },
-};
+// USB PnP identity presented in the Device Information Service — the shared
+// V-USB VID/PID, matching what prior hosts accepted.
+#define PNP_VENDOR_ID  0x16C0
+#define PNP_PRODUCT_ID 0x05DF
+#define PNP_VERSION    0x0100
 
-static esp_hid_device_config_t s_hid_config = {
-    .vendor_id         = 0x16C0,
-    .product_id        = 0x05DF,
-    .version           = 0x0100,
-    .device_name       = "Screen Hopper",
-    .manufacturer_name = "Screen Hopper",
-    .serial_number     = "1",
-    .report_maps       = s_report_maps,
-    .report_maps_len   = 1,
-};
+// HID Information characteristic value: bcdHID 1.11, no country code, and the
+// RemoteWake | NormallyConnectable flags.
+static const uint8_t HID_INFO[4] = { 0x11, 0x01, 0x00, 0x03 };
 
-// The HID service UUID (0x1812), advertised so hosts recognise us as a HID
-// peripheral. Bluedroid requires the full 128-bit expansion here — it iterates
-// the list in 16-byte chunks and re-emits base UUIDs in their short 16-bit form.
-static uint8_t s_hid_service_uuid128[] = {
-    0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80,
-    0x00, 0x10, 0x00, 0x00, 0x12, 0x18, 0x00, 0x00,
-};
+// The device's own advertising address type, resolved once at host sync.
+static uint8_t s_own_addr_type;
 
-// The advertising packet carries the HID identity (flags, service UUID,
-// appearance, tx power); the device name goes in the scan response so it is
-// never truncated by the 31-byte advert limit.
-static esp_ble_adv_data_t s_adv_data = {
-    .set_scan_rsp     = false,
-    .include_name     = false,
-    .include_txpower  = true,
-    .min_interval     = 0x0006,   // preferred connection interval, x1.25ms
-    .max_interval     = 0x0010,
-    .appearance       = ESP_HID_APPEARANCE_GENERIC,   // combined mouse+keyboard
-    .service_uuid_len = sizeof(s_hid_service_uuid128),
-    .p_service_uuid   = s_hid_service_uuid128,
-    .flag             = 0x6,       // LE General Discoverable, BR/EDR not supported
-};
+// GATT value handles for our two input-report characteristics, captured from the
+// registration callback below. Notifications are sent against these handles.
+static uint16_t s_mouse_val_handle;
+static uint16_t s_kbd_val_handle;
+// Report characteristics all share UUID 0x2A4D and register in the order we list
+// them in params.rpts[]; this counts them so we can tell mouse from keyboard.
+static int s_report_chr_seen;
 
-static esp_ble_adv_data_t s_scan_rsp_data = {
-    .set_scan_rsp = true,
-    .include_name = true,
-};
+// One slot per host we can hold live at once. Written from the NimBLE host task
+// (GAP events); read from the USB input task (sends). The fields are plain
+// word-sized values and a stale read only costs one dropped/extra report during
+// a connect/disconnect transition, so no lock is needed.
+typedef struct {
+    bool     in_use;
+    uint16_t conn_handle;
+    bool     mouse_sub;   // host enabled notifications on the mouse report
+    bool     kbd_sub;     // host enabled notifications on the keyboard report
+} host_slot_t;
 
-static esp_ble_adv_params_t s_adv_params = {
-    .adv_int_min       = 0x20,
-    .adv_int_max       = 0x30,
-    .adv_type          = ADV_TYPE_IND,
-    .own_addr_type     = BLE_ADDR_TYPE_PUBLIC,
-    .channel_map       = ADV_CHNL_ALL,
-    .adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
-};
+static host_slot_t s_hosts[BLE_HID_MAX_HOSTS];
 
-static void ble_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
+// ble_store_config_init() has no public header (per the NimBLE examples); it wires
+// up the NVS-backed bond store.
+void ble_store_config_init(void);
+
+// ---- slot helpers ---------------------------------------------------------
+
+static host_slot_t *slot_by_conn(uint16_t conn_handle)
 {
-    switch (event) {
-    case ESP_GAP_BLE_SEC_REQ_EVT:
-        // A host asked to secure the link; with Just Works there is nothing to
-        // confirm, so accept.
-        esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
-        break;
-
-    case ESP_GAP_BLE_AUTH_CMPL_EVT:
-        if (param->ble_security.auth_cmpl.success) {
-            s_encrypted = true;
-            ESP_LOGI(TAG, "bonded and encrypted — ready to send input");
-        } else {
-            ESP_LOGE(TAG, "pairing failed, reason 0x%x",
-                     param->ble_security.auth_cmpl.fail_reason);
+    for (int i = 0; i < BLE_HID_MAX_HOSTS; i++) {
+        if (s_hosts[i].in_use && s_hosts[i].conn_handle == conn_handle) {
+            return &s_hosts[i];
         }
-        break;
+    }
+    return NULL;
+}
+
+static int alloc_slot(uint16_t conn_handle)
+{
+    for (int i = 0; i < BLE_HID_MAX_HOSTS; i++) {
+        if (!s_hosts[i].in_use) {
+            s_hosts[i] = (host_slot_t){ .in_use = true, .conn_handle = conn_handle };
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int free_slots(void)
+{
+    int n = 0;
+    for (int i = 0; i < BLE_HID_MAX_HOSTS; i++) {
+        if (!s_hosts[i].in_use) {
+            n++;
+        }
+    }
+    return n;
+}
+
+// ---- advertising ----------------------------------------------------------
+
+static int ble_gap_event(struct ble_gap_event *event, void *arg);
+
+// Advertise connectable + undirected while at least one slot is free. The HID
+// identity (flags, appearance, HID service UUID, tx power) goes in the advert;
+// the device name goes in the scan response so it is never truncated by the
+// 31-byte advert limit.
+static void advertise_if_slot_free(void)
+{
+    if (free_slots() == 0 || ble_gap_adv_active()) {
+        return;
+    }
+
+    struct ble_hs_adv_fields fields = {0};
+    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+    fields.appearance = HID_APPEARANCE;
+    fields.appearance_is_present = 1;
+    fields.tx_pwr_lvl = BLE_HS_ADV_TX_PWR_LVL_AUTO;
+    fields.tx_pwr_lvl_is_present = 1;
+    fields.uuids16 = (ble_uuid16_t[]){ BLE_UUID16_INIT(BLE_SVC_HID_UUID16) };
+    fields.num_uuids16 = 1;
+    fields.uuids16_is_complete = 1;
+
+    int rc = ble_gap_adv_set_fields(&fields);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "adv_set_fields failed; rc=%d", rc);
+        return;
+    }
+
+    struct ble_hs_adv_fields rsp = {0};
+    const char *name = ble_svc_gap_device_name();
+    rsp.name = (uint8_t *)name;
+    rsp.name_len = strlen(name);
+    rsp.name_is_complete = 1;
+    rc = ble_gap_adv_rsp_set_fields(&rsp);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "adv_rsp_set_fields failed; rc=%d", rc);
+        return;
+    }
+
+    struct ble_gap_adv_params adv_params = {0};
+    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
+    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER,
+                           &adv_params, ble_gap_event, NULL);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "adv_start failed; rc=%d", rc);
+        return;
+    }
+    ESP_LOGI(TAG, "advertising as \"%s\" (%d slot(s) free)", name, free_slots());
+}
+
+// ---- GAP events -----------------------------------------------------------
+
+static int ble_gap_event(struct ble_gap_event *event, void *arg)
+{
+    switch (event->type) {
+    case BLE_GAP_EVENT_CONNECT:
+        if (event->connect.status == 0) {
+            int slot = alloc_slot(event->connect.conn_handle);
+            ESP_LOGI(TAG, "host connected (conn=%d) -> slot %d",
+                     event->connect.conn_handle, slot);
+        } else {
+            ESP_LOGW(TAG, "connect failed; status=%d", event->connect.status);
+        }
+        // NimBLE stops advertising on connect; restart if a slot remains free so
+        // a second host can find us.
+        advertise_if_slot_free();
+        return 0;
+
+    case BLE_GAP_EVENT_DISCONNECT: {
+        host_slot_t *s = slot_by_conn(event->disconnect.conn.conn_handle);
+        if (s) {
+            ESP_LOGI(TAG, "host disconnected (conn=%d, reason=%d), freeing slot",
+                     event->disconnect.conn.conn_handle, event->disconnect.reason);
+            *s = (host_slot_t){0};
+        }
+        advertise_if_slot_free();
+        return 0;
+    }
+
+    case BLE_GAP_EVENT_SUBSCRIBE: {
+        host_slot_t *s = slot_by_conn(event->subscribe.conn_handle);
+        if (s) {
+            if (event->subscribe.attr_handle == s_mouse_val_handle) {
+                s->mouse_sub = event->subscribe.cur_notify;
+            } else if (event->subscribe.attr_handle == s_kbd_val_handle) {
+                s->kbd_sub = event->subscribe.cur_notify;
+            }
+            ESP_LOGI(TAG, "subscribe (conn=%d attr=%d notify=%d): mouse=%d kbd=%d",
+                     event->subscribe.conn_handle, event->subscribe.attr_handle,
+                     event->subscribe.cur_notify, s->mouse_sub, s->kbd_sub);
+        }
+        return 0;
+    }
+
+    case BLE_GAP_EVENT_ENC_CHANGE: {
+        struct ble_gap_conn_desc desc;
+        int rc = ble_gap_conn_find(event->enc_change.conn_handle, &desc);
+        ESP_LOGI(TAG, "encryption change (conn=%d): status=%d encrypted=%d bonded=%d",
+                 event->enc_change.conn_handle, event->enc_change.status,
+                 rc == 0 ? desc.sec_state.encrypted : -1,
+                 rc == 0 ? desc.sec_state.bonded : -1);
+        return 0;
+    }
+
+    case BLE_GAP_EVENT_REPEAT_PAIRING: {
+        // The host lost its bond but is re-pairing. Drop the stale bond and let
+        // the new pairing proceed (hosts cache GATT/CCCD per bond, so a clean
+        // re-pair also clears any masked-fix state).
+        struct ble_gap_conn_desc desc;
+        if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
+            ble_store_util_delete_peer(&desc.peer_id_addr);
+        }
+        return BLE_GAP_REPEAT_PAIRING_RETRY;
+    }
 
     default:
-        break;
+        return 0;
     }
 }
 
-// esp_hidd device lifecycle. START fires once the GATT database is up; from then
-// on we advertise whenever no host is connected.
-static void hidd_event_cb(void *arg, esp_event_base_t base, int32_t id, void *event_data)
+// ---- GATT services --------------------------------------------------------
+
+// Capture our two input-report value handles as the GATT database registers.
+static void gatt_svr_register_cb(struct ble_gatt_register_ctxt *ctxt, void *arg)
 {
-    (void)arg;
-    (void)base;
-    (void)event_data;
-    esp_hidd_event_t event = (esp_hidd_event_t)id;
-
-    switch (event) {
-    case ESP_HIDD_START_EVENT:
-        ESP_LOGI(TAG, "HID stack started, advertising");
-        esp_ble_gap_start_advertising(&s_adv_params);
-        break;
-
-    case ESP_HIDD_CONNECT_EVENT:
-        ESP_LOGI(TAG, "host connected");
-        break;
-
-    case ESP_HIDD_DISCONNECT_EVENT:
-        ESP_LOGI(TAG, "host disconnected, re-advertising");
-        s_encrypted = false;
-        esp_ble_gap_start_advertising(&s_adv_params);
-        break;
-
-    default:
-        break;
+    if (ctxt->op != BLE_GATT_REGISTER_OP_CHR) {
+        return;
     }
+    if (ble_uuid_u16(ctxt->chr.chr_def->uuid) != BLE_SVC_HID_CHR_UUID16_RPT) {
+        return;
+    }
+    // Report characteristics register in the order we populate params.rpts[]:
+    // 0 = mouse input (id 1), 1 = keyboard input (id 2), 2 = keyboard LED output.
+    switch (s_report_chr_seen++) {
+    case 0:
+        s_mouse_val_handle = ctxt->chr.val_handle;
+        break;
+    case 1:
+        s_kbd_val_handle = ctxt->chr.val_handle;
+        break;
+    default:
+        break;   // LED output report — the host writes it; we never notify it.
+    }
+}
+
+static void hid_service_add(void)
+{
+    // ~1.3 KB — keep it off the (modest) main-task stack.
+    static struct ble_svc_hid_params params;
+    memset(&params, 0, sizeof(params));
+
+    memcpy(&params.hid_info, HID_INFO, sizeof(HID_INFO));   // hid_info is a uint32_t
+
+    memcpy(params.report_map, our_report_descriptor, our_report_descriptor_length);
+    params.report_map_len = our_report_descriptor_length;
+    // External Report Reference points at the Battery Service (HOGP convention).
+    params.external_rpt_ref = BLE_SVC_BAS_UUID16;
+
+    params.proto_mode_present = 1;
+    params.proto_mode = BLE_SVC_HID_PROTO_MODE_REPORT;
+
+    // Report-mode characteristics, in the order gatt_svr_register_cb expects.
+    params.rpts[0] = (struct report){
+        .type = BLE_SVC_HID_RPT_TYPE_INPUT,  .id = REPORT_ID_MOUSE,    .len = MOUSE_REPORT_SIZE };
+    params.rpts[1] = (struct report){
+        .type = BLE_SVC_HID_RPT_TYPE_INPUT,  .id = REPORT_ID_KEYBOARD, .len = KEYBOARD_REPORT_SIZE };
+    params.rpts[2] = (struct report){
+        .type = BLE_SVC_HID_RPT_TYPE_OUTPUT, .id = REPORT_ID_KEYBOARD, .len = 1 };
+    params.rpts_len = 3;
+
+    int rc = ble_svc_hid_add(params);
+    assert(rc == 0);
+}
+
+static void gatt_svr_init(void)
+{
+    ble_svc_gap_init();
+    ble_svc_gatt_init();
+    ble_svc_bas_init();
+
+    ble_svc_dis_init();
+    static const uint8_t pnp[7] = {
+        0x02,   // vendor id source: USB
+        PNP_VENDOR_ID  & 0xFF, (PNP_VENDOR_ID  >> 8) & 0xFF,
+        PNP_PRODUCT_ID & 0xFF, (PNP_PRODUCT_ID >> 8) & 0xFF,
+        PNP_VERSION    & 0xFF, (PNP_VERSION    >> 8) & 0xFF,
+    };
+    ble_svc_dis_pnp_id_set((const char *)pnp);
+    ble_svc_dis_manufacturer_name_set(DEVICE_NAME);
+    ble_svc_dis_serial_number_set("1");
+
+    hid_service_add();
+    ble_svc_hid_init();
+}
+
+// ---- host lifecycle -------------------------------------------------------
+
+static void on_sync(void)
+{
+    int rc = ble_hs_util_ensure_addr(0);   // prefer a public identity address
+    assert(rc == 0);
+    rc = ble_hs_id_infer_auto(0, &s_own_addr_type);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "no usable address; rc=%d", rc);
+        return;
+    }
+
+    if (s_mouse_val_handle == 0 || s_kbd_val_handle == 0) {
+        ESP_LOGE(TAG, "report handles not captured (mouse=%d kbd=%d)",
+                 s_mouse_val_handle, s_kbd_val_handle);
+    } else {
+        ESP_LOGI(TAG, "report handles: mouse=%d kbd=%d",
+                 s_mouse_val_handle, s_kbd_val_handle);
+    }
+
+    advertise_if_slot_free();
+}
+
+static void on_reset(int reason)
+{
+    ESP_LOGW(TAG, "nimble host reset; reason=%d", reason);
+}
+
+static void host_task(void *param)
+{
+    ESP_LOGI(TAG, "nimble host task started");
+    nimble_port_run();          // returns only on nimble_port_stop()
+    nimble_port_freertos_deinit();
 }
 
 esp_err_t ble_hid_init(void)
 {
-    s_report_maps[0].len = our_report_descriptor_length;
+    esp_err_t ret = nimble_port_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "nimble_port_init failed: %d", ret);
+        return ret;
+    }
 
-    // Controller: BLE only. Reclaim the Classic-BT controller memory we will
-    // never use.
-    ESP_RETURN_ON_ERROR(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT),
-                        TAG, "mem_release");
-    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
-    ESP_RETURN_ON_ERROR(esp_bt_controller_init(&bt_cfg), TAG, "controller_init");
-    ESP_RETURN_ON_ERROR(esp_bt_controller_enable(ESP_BT_MODE_BLE), TAG, "controller_enable");
+    // Security: Just Works (the device has no display/keypad), bonded, Secure
+    // Connections. Keys persist in NVS (CONFIG_BT_NIMBLE_NVS_PERSIST) so paired
+    // hosts reconnect without re-pairing.
+    ble_hs_cfg.sm_io_cap = BLE_HS_IO_NO_INPUT_OUTPUT;
+    ble_hs_cfg.sm_bonding = 1;
+    ble_hs_cfg.sm_sc = 1;
+    ble_hs_cfg.sm_mitm = 0;
+    ble_hs_cfg.sm_our_key_dist   = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
 
-    // Host stack (Bluedroid).
-    esp_bluedroid_config_t bluedroid_cfg = BT_BLUEDROID_INIT_CONFIG_DEFAULT();
-    ESP_RETURN_ON_ERROR(esp_bluedroid_init_with_cfg(&bluedroid_cfg), TAG, "bluedroid_init");
-    ESP_RETURN_ON_ERROR(esp_bluedroid_enable(), TAG, "bluedroid_enable");
+    ble_hs_cfg.reset_cb = on_reset;
+    ble_hs_cfg.sync_cb = on_sync;
+    ble_hs_cfg.gatts_register_cb = gatt_svr_register_cb;
+    ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
 
-    ESP_RETURN_ON_ERROR(esp_ble_gap_register_callback(ble_gap_cb), TAG, "gap_register");
-    ESP_RETURN_ON_ERROR(esp_ble_gatts_register_callback(esp_hidd_gatts_event_handler),
-                        TAG, "gatts_register");
+    gatt_svr_init();
 
-    // Security: bonded + encrypted with Secure Connections, but Just Works — the
-    // device has no keypad or display, so no MITM/passkey. Keys persist in NVS so
-    // paired hosts reconnect without re-pairing.
-    esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_BOND;
-    esp_ble_io_cap_t   iocap    = ESP_IO_CAP_NONE;
-    uint8_t key_size = 16;
-    uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
-    uint8_t rsp_key  = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
-    esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(auth_req));
-    esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(iocap));
-    esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(key_size));
-    esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(init_key));
-    esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &rsp_key, sizeof(rsp_key));
+    int rc = ble_svc_gap_device_name_set(DEVICE_NAME);
+    assert(rc == 0);
+    rc = ble_svc_gap_device_appearance_set(HID_APPEARANCE);
+    assert(rc == 0);
 
-    ESP_RETURN_ON_ERROR(esp_ble_gap_set_device_name(s_hid_config.device_name),
-                        TAG, "set_device_name");
-    ESP_RETURN_ON_ERROR(esp_ble_gap_config_adv_data(&s_adv_data), TAG, "config_adv_data");
-    ESP_RETURN_ON_ERROR(esp_ble_gap_config_adv_data(&s_scan_rsp_data), TAG, "config_scan_rsp");
+    ble_store_config_init();     // NVS-backed bond storage
 
-    // Registers the HID/Battery/Device-Info GATT services from our report map and
-    // starts the profile; the START event above kicks off advertising.
-    ESP_RETURN_ON_ERROR(
-        esp_hidd_dev_init(&s_hid_config, ESP_HID_TRANSPORT_BLE, hidd_event_cb, &s_hid_dev),
-        TAG, "hidd_dev_init");
+    nimble_port_freertos_init(host_task);
 
     return ESP_OK;
 }
 
-bool ble_hid_ready(void)
+// ---- per-host transport ---------------------------------------------------
+
+bool ble_hid_ready(int host)
 {
-    return s_encrypted && s_hid_dev != NULL && esp_hidd_dev_connected(s_hid_dev);
+    if (host < 0 || host >= BLE_HID_MAX_HOSTS) {
+        return false;
+    }
+    const host_slot_t *s = &s_hosts[host];
+    return s->in_use && s->mouse_sub && s->kbd_sub;
 }
 
-esp_err_t ble_hid_send_mouse(uint8_t buttons, uint16_t x, uint16_t y)
+esp_err_t ble_hid_send_mouse(int host, uint8_t buttons, uint16_t x, uint16_t y)
 {
-    if (!ble_hid_ready()) {
+    if (host < 0 || host >= BLE_HID_MAX_HOSTS) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    host_slot_t *s = &s_hosts[host];
+    if (!s->in_use || !s->mouse_sub) {
         return ESP_ERR_INVALID_STATE;
     }
+
     uint8_t report[MOUSE_REPORT_SIZE] = {
         buttons,
         (uint8_t)(x & 0xFF), (uint8_t)(x >> 8),
         (uint8_t)(y & 0xFF), (uint8_t)(y >> 8),
     };
-    return esp_hidd_dev_input_set(s_hid_dev, 0, REPORT_ID_MOUSE, report, sizeof(report));
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(report, sizeof(report));
+    if (om == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    // NimBLE frees om, and only puts it on the wire for this conn if it subscribed.
+    int rc = ble_gatts_notify_custom(s->conn_handle, s_mouse_val_handle, om);
+    return rc == 0 ? ESP_OK : ESP_FAIL;
 }
 
-esp_err_t ble_hid_send_keyboard(uint8_t modifiers, const uint8_t keys[6])
+esp_err_t ble_hid_send_keyboard(int host, uint8_t modifiers, const uint8_t keys[6])
 {
-    if (!ble_hid_ready()) {
+    if (host < 0 || host >= BLE_HID_MAX_HOSTS) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    host_slot_t *s = &s_hosts[host];
+    if (!s->in_use || !s->kbd_sub) {
         return ESP_ERR_INVALID_STATE;
     }
+
     uint8_t report[KEYBOARD_REPORT_SIZE] = {0};
     report[0] = modifiers;   // report[1] stays 0 (reserved byte)
     memcpy(&report[2], keys, 6);
-    return esp_hidd_dev_input_set(s_hid_dev, 0, REPORT_ID_KEYBOARD, report, sizeof(report));
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(report, sizeof(report));
+    if (om == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    int rc = ble_gatts_notify_custom(s->conn_handle, s_kbd_val_handle, om);
+    return rc == 0 ? ESP_OK : ESP_FAIL;
 }

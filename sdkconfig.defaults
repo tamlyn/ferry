@@ -15,13 +15,24 @@ CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 CONFIG_USB_HOST_HUBS_SUPPORTED=y
 
 # Bluetooth: we present as a BLE HID-over-GATT peripheral (mouse + keyboard) via
-# the Bluedroid host stack. BLE only — no Classic BT — so the controller runs in
-# BLE mode and we reclaim the Classic-BT memory at startup.
+# the NimBLE host stack. NimBLE keeps CCCD (notify-enabled) state *per connection*,
+# which is what lets us hold two live host links at once and route input to either
+# — the KVM behaviour M3 is built on (Bluedroid shares one CCCD value across hosts
+# and cannot). NimBLE also ships built-in HOGP service builders (HID/battery/
+# device-info), so we don't hand-build the GATT attribute table.
 CONFIG_BT_ENABLED=y
-CONFIG_BT_BLUEDROID_ENABLED=y
-CONFIG_BT_BLE_ENABLED=y
-CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
+CONFIG_BT_NIMBLE_ENABLED=y
 
-# Bluedroid roughly doubles the binary, so give the app a larger partition (the
-# 16MB flash has ample room; this layout keeps an NVS partition for the bonds).
+# Enable NimBLE's built-in HID service builder (ble_svc_hid); off by default.
+CONFIG_BT_NIMBLE_HID_SERVICE=y
+
+# Two simultaneous host links — the whole point of M3. (Default is 3.)
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=2
+
+# Persist bonding keys across reboots so paired hosts reconnect without re-pairing
+# (PRD FR6). Off by default in NimBLE.
+CONFIG_BT_NIMBLE_NVS_PERSIST=y
+
+# Give the app a larger partition and keep an NVS partition for the bonds (the
+# 16MB flash has ample room).
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y

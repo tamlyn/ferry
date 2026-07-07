@@ -4,7 +4,8 @@
 #include <stdint.h>
 
 // Report IDs used in the combined HID report map. The host addresses each of our
-// two reports by these IDs, and esp_hidd_dev_input_set() takes the same value.
+// two reports by these IDs; they also tag the report-reference descriptors NimBLE
+// builds, which is how a host maps a notification back to mouse vs keyboard.
 #define REPORT_ID_MOUSE     1
 #define REPORT_ID_KEYBOARD  2
 

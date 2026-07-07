@@ -6,22 +6,32 @@
 
 #include "esp_err.h"
 
-// Bring up the BLE HID-over-GATT peripheral: a combined absolute-pointer mouse +
-// boot keyboard the host can pair with and drive with no host-side software.
-// Advertises, bonds (Just Works — the device has no keypad), and persists bonds
-// in NVS. Call nvs_flash_init() before this.
+// The number of hosts we can hold live at once — a two-machine KVM. Slot indices
+// are 0..BLE_HID_MAX_HOSTS-1; by convention slot 0 is the "left" host and slot 1
+// the "right", in connection order (see kvm.c).
+#define BLE_HID_MAX_HOSTS 2
+
+// Bring up the BLE HID-over-GATT peripheral on the NimBLE host stack: a combined
+// absolute-pointer mouse + boot keyboard that up to BLE_HID_MAX_HOSTS computers
+// can pair with and drive with no host-side software. Advertises (and keeps
+// advertising while a slot is free), bonds (Just Works — the device has no
+// keypad), keeps notification state per connection, and persists bonds in NVS.
+// Call nvs_flash_init() before this.
 esp_err_t ble_hid_init(void);
 
-// True once a host is connected *and* the link is encrypted — i.e. it is safe to
-// send input reports. Sends before this are dropped.
-bool ble_hid_ready(void);
+// True once host `host` is connected *and* has subscribed to our input reports —
+// i.e. it is safe to send it input. Sends to a host that is not ready are
+// dropped. `host` out of range returns false.
+bool ble_hid_ready(int host);
 
-// Send an absolute-pointer report. buttons is a bitmask (bit0 = left, bit1 =
-// right, bit2 = middle...); x/y are absolute coordinates in 0..ABS_AXIS_MAX.
-esp_err_t ble_hid_send_mouse(uint8_t buttons, uint16_t x, uint16_t y);
+// Send an absolute-pointer report to host `host`. buttons is a bitmask (bit0 =
+// left, bit1 = right, bit2 = middle...); x/y are absolute coordinates in
+// 0..ABS_AXIS_MAX. NimBLE only puts the notification on the wire if that host
+// subscribed, so input never leaks to the wrong machine.
+esp_err_t ble_hid_send_mouse(int host, uint8_t buttons, uint16_t x, uint16_t y);
 
-// Send a boot-keyboard report: a modifier bitmask plus up to six concurrent
-// keycodes (0 = unused slot).
-esp_err_t ble_hid_send_keyboard(uint8_t modifiers, const uint8_t keys[6]);
+// Send a boot-keyboard report to host `host`: a modifier bitmask plus up to six
+// concurrent keycodes (0 = unused slot).
+esp_err_t ble_hid_send_keyboard(int host, uint8_t modifiers, const uint8_t keys[6]);
 
 #endif
