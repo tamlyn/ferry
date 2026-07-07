@@ -1,6 +1,18 @@
 CONFIG_IDF_TARGET="esp32s3"
 
+# The dev board has a 16MB flash chip; the ESP-IDF default is 2MB.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
 # The native USB port (GPIO19/20) is dedicated to hosting the mouse + keyboard,
 # so it cannot also serve the USB-Serial-JTAG console — they share the same PHY.
 # Logs therefore go out over UART0 (the dev-kit's UART-bridge port). See README.
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# The mouse and keyboard connect through an external USB hub, so the host stack
+# must support hubs. It is off by default in ESP-IDF v5.4.
+CONFIG_USB_HOST_HUBS_SUPPORTED=y
+
+# Most basic wired mice and keyboards are low-speed devices, and ESP-IDF only
+# supports low-speed devices behind an external hub via this experimental option.
+CONFIG_IDF_EXPERIMENTAL_FEATURES=y
+CONFIG_USB_HOST_EXT_PORT_SUPPORT_LS=y

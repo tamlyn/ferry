@@ -148,29 +148,55 @@ static void hid_host_interface_callback(hid_host_device_handle_t handle,
     }
 }
 
-// A new device was connected: open it, put it in boot protocol, and start it.
+// A new device was connected. We only host boot-protocol mice and keyboards, so
+// ignore every other HID interface — a keyboard's extra media-key interface, a
+// mouse's vendor interface, a joystick. Besides being undecodable here, claiming
+// them ties up the ESP32-S3's limited USB host channels on pipes we never read,
+// which is exactly what starves a second device sharing a hub.
+//
+// A device we cannot drive — an unsupported low-speed device, a quirky one that
+// stalls a control transfer — must not take down the host: we log and skip just
+// that device rather than aborting the whole board.
 static void handle_device_connected(hid_host_device_handle_t handle)
 {
     hid_host_dev_params_t params;
     ESP_ERROR_CHECK(hid_host_device_get_params(handle, &params));
+
+    if (params.proto != HID_PROTOCOL_KEYBOARD && params.proto != HID_PROTOCOL_MOUSE) {
+        ESP_LOGI(TAG, "ignoring %s interface", proto_name(params.proto));
+        return;
+    }
     ESP_LOGI(TAG, "%s connected", proto_name(params.proto));
 
     const hid_host_device_config_t dev_config = {
         .callback = hid_host_interface_callback,
         .callback_arg = NULL,
     };
-    ESP_ERROR_CHECK(hid_host_device_open(handle, &dev_config));
+    esp_err_t err = hid_host_device_open(handle, &dev_config);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "cannot open %s: %s", proto_name(params.proto), esp_err_to_name(err));
+        return;
+    }
 
+    // The device is open now, so every later failure must close it before
+    // bailing out, or the handle leaks and the port never re-enumerates cleanly.
     if (params.sub_class == HID_SUBCLASS_BOOT_INTERFACE) {
-        ESP_ERROR_CHECK(hid_class_request_set_protocol(handle, HID_REPORT_PROTOCOL_BOOT));
-        if (params.proto == HID_PROTOCOL_KEYBOARD) {
-            ESP_ERROR_CHECK(hid_class_request_set_idle(handle, 0, 0));
+        err = hid_class_request_set_protocol(handle, HID_REPORT_PROTOCOL_BOOT);
+        if (err == ESP_OK && params.proto == HID_PROTOCOL_KEYBOARD) {
+            err = hid_class_request_set_idle(handle, 0, 0);
         }
     } else {
         ESP_LOGW(TAG, "device has no boot interface; M1 only decodes boot reports");
     }
 
-    ESP_ERROR_CHECK(hid_host_device_start(handle));
+    if (err == ESP_OK) {
+        err = hid_host_device_start(handle);
+    }
+
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "cannot start %s: %s", proto_name(params.proto), esp_err_to_name(err));
+        hid_host_device_close(handle);
+    }
 }
 
 // Runs in the HID host driver's background task — keep it light: just forward

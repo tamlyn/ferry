@@ -14,5 +14,6 @@ dependencies.lock
 
 # Editor / OS
 .idea/
+.cache/
 .DS_Store
 *.pyc
