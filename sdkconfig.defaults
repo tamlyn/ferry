@@ -9,10 +9,7 @@ CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 
 # The mouse and keyboard connect through an external USB hub, so the host stack
-# must support hubs. It is off by default in ESP-IDF v5.4.
+# must support hubs (off by default). Low-speed devices behind a hub — most
+# basic wired mice and keyboards — are supported out of the box as of ESP-IDF
+# v5.5; on v5.4 that needed experimental flags and crashed on enumeration errors.
 CONFIG_USB_HOST_HUBS_SUPPORTED=y
-
-# Most basic wired mice and keyboards are low-speed devices, and ESP-IDF only
-# supports low-speed devices behind an external hub via this experimental option.
-CONFIG_IDF_EXPERIMENTAL_FEATURES=y
-CONFIG_USB_HOST_EXT_PORT_SUPPORT_LS=y
