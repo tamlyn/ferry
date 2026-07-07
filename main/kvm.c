@@ -36,7 +36,7 @@ static int pick_active(void)
     return -1;
 }
 
-void kvm_on_mouse(uint8_t buttons, int dx, int dy)
+void kvm_on_mouse(uint8_t buttons, int dx, int dy, int wheel)
 {
     int active = pick_active();
     if (active < 0) {
@@ -65,7 +65,8 @@ void kvm_on_mouse(uint8_t buttons, int dx, int dy)
     }
 
     ble_hid_send_mouse(s_active, buttons,
-                       cursor_x(&s_cursor[s_active]), cursor_y(&s_cursor[s_active]));
+                       cursor_x(&s_cursor[s_active]), cursor_y(&s_cursor[s_active]),
+                       (int8_t)wheel);
 }
 
 void kvm_on_keyboard(uint8_t modifiers, const uint8_t keys[6])

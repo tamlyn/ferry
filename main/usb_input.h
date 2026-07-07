@@ -9,8 +9,9 @@
 // light — they run on that task.
 //
 // buttons is a bitmask (bit0 = left, bit1 = right, bit2 = middle); dx/dy are
-// relative motion counts. keys holds up to six concurrent keycodes (0 = unused).
-typedef void (*usb_mouse_report_cb)(uint8_t buttons, int dx, int dy);
+// relative motion counts; wheel is the signed scroll delta (0 when the mouse
+// sent no wheel byte). keys holds up to six concurrent keycodes (0 = unused).
+typedef void (*usb_mouse_report_cb)(uint8_t buttons, int dx, int dy, int wheel);
 typedef void (*usb_keyboard_report_cb)(uint8_t modifiers, const uint8_t keys[6]);
 
 // Start hosting USB HID: install the USB host + HID class driver and enumerate a

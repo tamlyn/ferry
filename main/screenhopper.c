@@ -17,12 +17,12 @@
 
 static const char *TAG = "screenhopper";
 
-// A USB mouse report: hand the relative delta + button state to the KVM, which
-// moves the active host's cursor (hopping between hosts at the screen edges) and
-// sends the absolute position on.
-static void on_mouse(uint8_t buttons, int dx, int dy)
+// A USB mouse report: hand the relative delta + button + wheel state to the KVM,
+// which moves the active host's cursor (hopping between hosts at the screen
+// edges) and sends the absolute position (plus the wheel) on.
+static void on_mouse(uint8_t buttons, int dx, int dy, int wheel)
 {
-    kvm_on_mouse(buttons, dx, dy);
+    kvm_on_mouse(buttons, dx, dy, wheel);
 }
 
 // A USB keyboard report: the KVM routes it to the active host.

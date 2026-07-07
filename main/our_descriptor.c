@@ -9,7 +9,8 @@
 // CLAUDE.md).
 //
 //   - mouse: 8 buttons (1 byte) + 16-bit absolute X/Y, logical 0..32767
-//     (digitizer-style pointer). Wheel/pan are deliberately omitted for now.
+//     (digitizer-style pointer) + a signed 8-bit relative scroll wheel.
+//     Horizontal pan is deliberately omitted for now.
 //   - keyboard: standard 6-key boot report (modifiers + reserved + 6 keycodes),
 //     plus the LED output report a host uses for Caps/Num Lock.
 const uint8_t our_report_descriptor[] = {
@@ -36,6 +37,12 @@ const uint8_t our_report_descriptor[] = {
     0x75, 0x10,                    //     Report Size (16)
     0x95, 0x02,                    //     Report Count (2)
     0x81, 0x02,                    //     Input (Data,Var,Abs)
+    0x09, 0x38,                    //     Usage (Wheel)
+    0x15, 0x81,                    //     Logical Minimum (-127)
+    0x25, 0x7F,                    //     Logical Maximum (127)
+    0x75, 0x08,                    //     Report Size (8)
+    0x95, 0x01,                    //     Report Count (1)
+    0x81, 0x06,                    //     Input (Data,Var,Rel)
     0xC0,                          //   End Collection
     0xC0,                          // End Collection
 

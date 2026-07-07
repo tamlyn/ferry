@@ -26,9 +26,10 @@ bool ble_hid_ready(int host);
 
 // Send an absolute-pointer report to host `host`. buttons is a bitmask (bit0 =
 // left, bit1 = right, bit2 = middle...); x/y are absolute coordinates in
-// 0..ABS_AXIS_MAX. NimBLE only puts the notification on the wire if that host
-// subscribed, so input never leaks to the wrong machine.
-esp_err_t ble_hid_send_mouse(int host, uint8_t buttons, uint16_t x, uint16_t y);
+// 0..ABS_AXIS_MAX; wheel is a signed relative scroll delta. NimBLE only puts the
+// notification on the wire if that host subscribed, so input never leaks to the
+// wrong machine.
+esp_err_t ble_hid_send_mouse(int host, uint8_t buttons, uint16_t x, uint16_t y, int8_t wheel);
 
 // Send a boot-keyboard report to host `host`: a modifier bitmask plus up to six
 // concurrent keycodes (0 = unused slot).

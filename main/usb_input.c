@@ -2,9 +2,11 @@
 // through a hub) and deliver decoded HID reports to the app via callbacks.
 //
 // Devices are driven in the HID *boot* protocol: a mouse gives 8-bit relative
-// dx/dy + buttons, a keyboard gives modifiers + up to six keycodes. Report-
-// protocol parsing of a device's own descriptor (wheels, extra buttons, NKRO)
-// is a later milestone.
+// dx/dy + buttons, a keyboard gives modifiers + up to six keycodes. The spec's
+// boot mouse report is 3 bytes with no wheel, but nearly every real mouse
+// appends a signed wheel byte anyway, which we read opportunistically (see
+// dispatch_mouse_report). Full report-protocol parsing of a device's own
+// descriptor (extra buttons, horizontal pan, NKRO) is a later milestone.
 
 #include "usb_input.h"
 
@@ -64,7 +66,14 @@ static void dispatch_mouse_report(const uint8_t *data, size_t len)
     uint8_t buttons = (r->buttons.button1 ? 0x01 : 0) |
                       (r->buttons.button2 ? 0x02 : 0) |
                       (r->buttons.button3 ? 0x04 : 0);
-    s_on_mouse(buttons, r->x_displacement, r->y_displacement);
+
+    // The 3-byte boot report carries no wheel, but nearly every mouse appends a
+    // signed wheel byte as a 4th byte. Read it when present; mice that omit it
+    // simply never scroll.
+    int wheel = (len > sizeof(hid_mouse_input_report_boot_t))
+                    ? (int8_t)data[sizeof(hid_mouse_input_report_boot_t)]
+                    : 0;
+    s_on_mouse(buttons, r->x_displacement, r->y_displacement, wheel);
 }
 
 static void dispatch_keyboard_report(const uint8_t *data, size_t len)
