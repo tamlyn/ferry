@@ -37,7 +37,9 @@ source ~/.espressif/tools/activate_idf_v5.5.4.fish
 (EN) to reset the chip, then read for a fixed window. Logs are on **UART0** because
 the native USB port hosts the input devices. To watch a *live* session without
 dropping its connections, open the port holding RTS/DTR deasserted (no reset) instead
-of pulsing.
+of pulsing. Don't capture with `stty -f <port> …` + `cat`: macOS resets the termios
+settings between the two opens, so the capture records garbage at the wrong baud.
+Keep the port held open by one process (pyserial) for the whole session.
 
 ## Clearing bonds (and the mandatory host-side step)
 
@@ -67,6 +69,14 @@ The board is a 44-pin **ESP32-S3-WROOM-1 N16R8** dev board
 - **USB hub support needs ESP-IDF ≥ 5.5.** v5.4's experimental external-hub code
   asserted and reboot-looped on hub enumeration glitches; v5.5 makes low-speed
   devices behind a hub supported. That's why the project is pinned to v5.5.4.
+- **Watch — standalone-power stability.** Seen once: a few seconds unresponsive, LED
+  flash, then recovery — but it coincided with swapping the USB power source, i.e. a
+  plain power-cycle (the boot log confirmed a clean `POWERON` reset, and it then ran
+  50 s of heavy input on Mac-USB power with no reset). So *that* instance was benign.
+  Keep an eye on it when running standalone off a wall adapter: a reboot *while sitting
+  steady* on adapter power points at a brownout under the hub + two HID devices + BLE
+  radio load — try a beefier supply or bulk capacitance on the 5 V rail before
+  suspecting firmware.
 
 ## BLE stack
 
@@ -79,8 +89,10 @@ don't hand-build the GATT attribute table. `esp_hid`'s device layer is single-ho
 in `ble_hid.c` is ours regardless.
 
 The HID report map in `our_descriptor.c` is the **external contract** the hosts pair
-against (mouse report id 1 with absolute X/Y; keyboard report id 2). It is proven on
-macOS + Windows — don't change it without re-testing both.
+against (mouse report id 1 with absolute X/Y plus a relative scroll wheel; keyboard
+report id 2). The base map is proven on macOS + Windows; the scroll wheel is verified
+on macOS but **not yet re-tested on Windows**. Don't change it without re-testing both
+— and see gotcha #9: a changed map needs a host cache flush, not just a re-pair.
 
 ## BLE gotchas (read before touching `ble_hid.c` or the BLE `sdkconfig`)
 
@@ -135,6 +147,28 @@ on macOS or only with two hosts.
 7. **NimBLE log spam.** At INFO level NimBLE logs one line per notification, flooding
    UART0 on every mouse move. Pinned to WARNING (`CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING`);
    our own `ble_hid` / `kvm` INFO logs still show.
+
+8. **Open — PC cursor stutter when both hosts are live** (smooth with the PC alone;
+   the Mac is smooth regardless). Params are healthy — both links 15 ms / latency 0
+   (macOS connects at 30 ms and renegotiates down; Windows asks for 15 directly) —
+   so the suspect is the two centrals' connection-event anchors drifting into
+   alignment, making the controller skip one link's events in patches (would recur
+   intermittently on a tens-of-seconds/minutes cadence). Diagnostics are already in
+   the firmware: conn params log on connect/update, and failed sends log a
+   rate-limited `mouse notify failed`. If stutter recurs **with** drop warnings →
+   coalesce motion reports device-side (latest absolute position wins; flush button
+   changes immediately). **Without** warnings → request 7.5 ms on the PC link via
+   `ble_gap_update_params` so it interleaves harmonically with the Mac's 15 ms.
+
+9. **Changing the report map needs a host descriptor-cache flush, not just a re-pair.**
+   macOS caches the HID report map keyed by the device's identity address, so "Forget
+   This Device" + re-pair reconnects against the *cached* map — a newly added field
+   (e.g. the scroll wheel's 6th byte) is silently ignored while everything in the old
+   byte layout keeps working. Force a real re-read: forget the device, toggle the
+   host's Bluetooth **off then on** (flushes `bluetoothd`), then re-pair; reboot the
+   host if that isn't enough. Tell-tale symptom: the new field does nothing, but
+   motion/buttons/keys are all fine. This is what made the scroll wheel look broken
+   even though the device was already sending correct 6-byte reports.
 
 ## Observing BLE from the dev Mac
 
