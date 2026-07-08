@@ -26,6 +26,13 @@ CONFIG_BT_NIMBLE_ENABLED=y
 # Enable NimBLE's built-in HID service builder (ble_svc_hid); off by default.
 CONFIG_BT_NIMBLE_HID_SERVICE=y
 
+# A fourth HID report characteristic. NimBLE sizes its rpts[] array to this max
+# (default 3 — our mouse input, keyboard input, keyboard LED output); the
+# relative-pointer report (id 3) used for display-boundary crossings is a fourth.
+# Each host also gains a 5th CCCD for it (10 total across two hosts, still under
+# CONFIG_BT_NIMBLE_MAX_CCCDS=16).
+CONFIG_BT_NIMBLE_SVC_HID_MAX_RPTS=4
+
 # Two simultaneous host links — the whole point of M3. (Default is 3.)
 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=2
 

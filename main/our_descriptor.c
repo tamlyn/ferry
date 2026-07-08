@@ -13,6 +13,12 @@
 //     Horizontal pan is deliberately omitted for now.
 //   - keyboard: standard 6-key boot report (modifiers + reserved + 6 keycodes),
 //     plus the LED output report a host uses for Caps/Num Lock.
+//   - relative pointer (report id 3): a second mouse whose X/Y are relative, used
+//     to walk the cursor across a display boundary that absolute positioning cannot
+//     cross (the host clamps absolute X/Y to the display the cursor is on). This is
+//     what lets the cursor hop between two displays of one host. Changing it means
+//     a host descriptor-cache flush, not just a re-pair (see gotcha #9); it's
+//     verified on macOS but not yet re-tested on Windows.
 const uint8_t our_report_descriptor[] = {
     // ---------------------------------------------------------------- Mouse
     0x05, 0x01,                    // Usage Page (Generic Desktop)
@@ -79,6 +85,35 @@ const uint8_t our_report_descriptor[] = {
     0x75, 0x08,                    //   Report Size (8)
     0x95, 0x06,                    //   Report Count (6)
     0x81, 0x00,                    //   Input (Data,Array)     6 keycodes
+    0xC0,                          // End Collection
+
+    // ------------------------------------------------- Relative pointer (id 3)
+    // A second mouse whose X/Y are *relative*, used to nudge the cursor across a
+    // display seam onto the adjacent display, from where absolute positioning
+    // (report id 1) takes over again. Both pointers drive the one system cursor.
+    0x05, 0x01,                    // Usage Page (Generic Desktop)
+    0x09, 0x02,                    // Usage (Mouse)
+    0xA1, 0x01,                    // Collection (Application)
+    0x85, REPORT_ID_MOUSE_REL,     //   Report ID (3)
+    0x09, 0x01,                    //   Usage (Pointer)
+    0xA1, 0x00,                    //   Collection (Physical)
+    0x05, 0x09,                    //     Usage Page (Button)
+    0x19, 0x01,                    //     Usage Minimum (Button 1)
+    0x29, 0x08,                    //     Usage Maximum (Button 8)
+    0x15, 0x00,                    //     Logical Minimum (0)
+    0x25, 0x01,                    //     Logical Maximum (1)
+    0x75, 0x01,                    //     Report Size (1)
+    0x95, 0x08,                    //     Report Count (8)
+    0x81, 0x02,                    //     Input (Data,Var,Abs)
+    0x05, 0x01,                    //     Usage Page (Generic Desktop)
+    0x09, 0x30,                    //     Usage (X)
+    0x09, 0x31,                    //     Usage (Y)
+    0x15, 0x81,                    //     Logical Minimum (-127)
+    0x25, 0x7F,                    //     Logical Maximum (127)
+    0x75, 0x08,                    //     Report Size (8)
+    0x95, 0x02,                    //     Report Count (2)
+    0x81, 0x06,                    //     Input (Data,Var,Rel)   relative X/Y
+    0xC0,                          //   End Collection
     0xC0,                          // End Collection
 };
 

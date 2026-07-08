@@ -57,6 +57,7 @@ static uint8_t s_own_addr_type;
 // registration callback below. Notifications are sent against these handles.
 static uint16_t s_mouse_val_handle;
 static uint16_t s_kbd_val_handle;
+static uint16_t s_mouse_rel_val_handle;   // relative-pointer report (id 3)
 // Report characteristics all share UUID 0x2A4D and register in the order we list
 // them in params.rpts[]; this counts them so we can tell mouse from keyboard.
 static int s_report_chr_seen;
@@ -70,6 +71,7 @@ typedef struct {
     uint16_t conn_handle;
     bool     mouse_sub;   // host enabled notifications on the mouse report
     bool     kbd_sub;     // host enabled notifications on the keyboard report
+    bool     mouse_rel_sub;   // host enabled notifications on the relative-pointer report
 } host_slot_t;
 
 static host_slot_t s_hosts[BLE_HID_MAX_HOSTS];
@@ -238,10 +240,13 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
                 s->mouse_sub = event->subscribe.cur_notify;
             } else if (event->subscribe.attr_handle == s_kbd_val_handle) {
                 s->kbd_sub = event->subscribe.cur_notify;
+            } else if (event->subscribe.attr_handle == s_mouse_rel_val_handle) {
+                s->mouse_rel_sub = event->subscribe.cur_notify;
             }
-            ESP_LOGI(TAG, "subscribe (conn=%d attr=%d notify=%d): mouse=%d kbd=%d",
+            ESP_LOGI(TAG, "subscribe (conn=%d attr=%d notify=%d): mouse=%d kbd=%d rel=%d",
                      event->subscribe.conn_handle, event->subscribe.attr_handle,
-                     event->subscribe.cur_notify, s->mouse_sub, s->kbd_sub);
+                     event->subscribe.cur_notify, s->mouse_sub, s->kbd_sub,
+                     s->mouse_rel_sub);
         }
         return 0;
     }
@@ -291,7 +296,8 @@ static void gatt_svr_register_cb(struct ble_gatt_register_ctxt *ctxt, void *arg)
         return;
     }
     // Report characteristics register in the order we populate params.rpts[]:
-    // 0 = mouse input (id 1), 1 = keyboard input (id 2), 2 = keyboard LED output.
+    // 0 = mouse input (id 1), 1 = keyboard input (id 2), 2 = keyboard LED output,
+    // 3 = relative-pointer input (id 3).
     switch (s_report_chr_seen++) {
     case 0:
         s_mouse_val_handle = ctxt->chr.val_handle;
@@ -299,8 +305,11 @@ static void gatt_svr_register_cb(struct ble_gatt_register_ctxt *ctxt, void *arg)
     case 1:
         s_kbd_val_handle = ctxt->chr.val_handle;
         break;
+    case 3:
+        s_mouse_rel_val_handle = ctxt->chr.val_handle;
+        break;
     default:
-        break;   // LED output report — the host writes it; we never notify it.
+        break;   // case 2: LED output report — the host writes it; we never notify it.
     }
 }
 
@@ -327,7 +336,9 @@ static void hid_service_add(void)
         .type = BLE_SVC_HID_RPT_TYPE_INPUT,  .id = REPORT_ID_KEYBOARD, .len = KEYBOARD_REPORT_SIZE };
     params.rpts[2] = (struct report){
         .type = BLE_SVC_HID_RPT_TYPE_OUTPUT, .id = REPORT_ID_KEYBOARD, .len = 1 };
-    params.rpts_len = 3;
+    params.rpts[3] = (struct report){   // relative pointer, registers 4th (case 3)
+        .type = BLE_SVC_HID_RPT_TYPE_INPUT,  .id = REPORT_ID_MOUSE_REL, .len = MOUSE_REL_REPORT_SIZE };
+    params.rpts_len = 4;
 
     int rc = ble_svc_hid_add(params);
     assert(rc == 0);
@@ -370,8 +381,8 @@ static void on_sync(void)
         ESP_LOGE(TAG, "report handles not captured (mouse=%d kbd=%d)",
                  s_mouse_val_handle, s_kbd_val_handle);
     } else {
-        ESP_LOGI(TAG, "report handles: mouse=%d kbd=%d",
-                 s_mouse_val_handle, s_kbd_val_handle);
+        ESP_LOGI(TAG, "report handles: mouse=%d kbd=%d rel=%d",
+                 s_mouse_val_handle, s_kbd_val_handle, s_mouse_rel_val_handle);
     }
 
     advertise_if_slot_free();
@@ -471,6 +482,25 @@ esp_err_t ble_hid_send_mouse(int host, uint8_t buttons, uint16_t x, uint16_t y, 
         return ESP_FAIL;
     }
     return ESP_OK;
+}
+
+esp_err_t ble_hid_send_mouse_rel(int host, uint8_t buttons, int8_t dx, int8_t dy)
+{
+    if (host < 0 || host >= BLE_HID_MAX_HOSTS) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    host_slot_t *s = &s_hosts[host];
+    if (!s->in_use || !s->mouse_rel_sub) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    uint8_t report[MOUSE_REL_REPORT_SIZE] = { buttons, (uint8_t)dx, (uint8_t)dy };
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(report, sizeof(report));
+    if (om == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    int rc = ble_gatts_notify_custom(s->conn_handle, s_mouse_rel_val_handle, om);
+    return rc == 0 ? ESP_OK : ESP_FAIL;
 }
 
 esp_err_t ble_hid_send_keyboard(int host, uint8_t modifiers, const uint8_t keys[6])
