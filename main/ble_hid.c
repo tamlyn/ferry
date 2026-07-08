@@ -92,18 +92,77 @@ static host_slot_t *slot_by_conn(uint16_t conn_handle)
     return NULL;
 }
 
+// Pin each machine to a fixed slot by its bonded BLE *identity* address, so a host
+// always lands in the same slot — and therefore the same displays in layout.c —
+// regardless of which order the two machines connect in. Without this, slots are
+// first-come, so a re-pair silently swaps which machine is which (the Mac gets driven
+// as the PC and vice versa). SLOT_MAC must match HOST_MAC in layout.c.
+//
+// Only the Mac is pinned; whatever else connects takes the other slot. macOS connects
+// from a rotating resolvable private address, so we match on the resolved *identity*
+// address (peer_id_addr), not the address it connected with. Read k_mac_id_addr off
+// the "peer id" log line the Mac prints when it bonds; bytes are little-endian, so
+// 70:8C:F2:CC:B9:45 is written low byte first. (For reference, the PC currently
+// enumerates as 28:6B:35:EC:4B:F3; only the Mac is pinned, so its address isn't used.)
+#define SLOT_MAC 0
+static const uint8_t k_mac_id_addr[6] = { 0x45, 0xB9, 0xCC, 0xF2, 0x8C, 0x70 };
+
+// The connection's resolved identity address, or false if not yet known (e.g. a
+// fresh pairing before keys are exchanged).
+static bool conn_id_addr(uint16_t conn_handle, uint8_t out[6])
+{
+    struct ble_gap_conn_desc desc;
+    if (ble_gap_conn_find(conn_handle, &desc) != 0) {
+        return false;
+    }
+    memcpy(out, desc.peer_id_addr.val, 6);
+    return true;
+}
+
+static bool is_mac(uint16_t conn_handle)
+{
+    uint8_t id[6];
+    return conn_id_addr(conn_handle, id) && memcmp(id, k_mac_id_addr, 6) == 0;
+}
+
+// Is slot `slot` held for a specific machine that is NOT the one connecting now? Such
+// a slot is kept open so a non-pinned host (the PC) can't squat it by connecting
+// first. An unresolved identity counts as "not the pinned host" — better to route it
+// to the other slot than to let it take the Mac's.
+static bool slot_reserved_for_other(int slot, uint16_t conn_handle)
+{
+    return slot == SLOT_MAC && !is_mac(conn_handle);
+}
+
 // Find the connection's slot, allocating one on first sight. Events for a new
 // connection do not begin with BLE_GAP_EVENT_CONNECT on this NimBLE fork: the
 // host defers it behind a remote version/feature exchange, so a bonded peer's
 // ENC_CHANGE — and the SUBSCRIBE events restoring its persisted CCCDs — arrive
 // first. Keying allocation off any event that names the connection means those
 // restored subscriptions land in the slot instead of being dropped.
+//
+// The slot is chosen by identity, not connection order (see k_mac_id_addr): the Mac
+// always gets SLOT_MAC. A bonded peer's identity is resolved by the time its first
+// event arrives; a fresh pairing may not resolve until keys are exchanged, so it
+// falls back to a free slot and settles on the next reconnect.
 static host_slot_t *slot_find_or_alloc(uint16_t conn_handle)
 {
     host_slot_t *s = slot_by_conn(conn_handle);
     if (s) {
         return s;
     }
+    if (is_mac(conn_handle) && !s_hosts[SLOT_MAC].in_use) {
+        s_hosts[SLOT_MAC] = (host_slot_t){ .in_use = true, .conn_handle = conn_handle };
+        return &s_hosts[SLOT_MAC];
+    }
+    // Take a free slot, skipping any reserved for an absent pinned host.
+    for (int i = 0; i < BLE_HID_MAX_HOSTS; i++) {
+        if (!s_hosts[i].in_use && !slot_reserved_for_other(i, conn_handle)) {
+            s_hosts[i] = (host_slot_t){ .in_use = true, .conn_handle = conn_handle };
+            return &s_hosts[i];
+        }
+    }
+    // Everything free is reserved for someone else, but we still need a slot.
     for (int i = 0; i < BLE_HID_MAX_HOSTS; i++) {
         if (!s_hosts[i].in_use) {
             s_hosts[i] = (host_slot_t){ .in_use = true, .conn_handle = conn_handle };
@@ -194,6 +253,20 @@ static void log_conn_params(const char *when, uint16_t conn_handle)
              desc.conn_latency, desc.supervision_timeout * 10);
 }
 
+// Log the peer's resolved identity address — this is what slot pinning matches on, so
+// it's how you read a machine's address to fill in k_mac_id_addr.
+static void log_peer_id(const char *when, uint16_t conn_handle)
+{
+    struct ble_gap_conn_desc desc;
+    if (ble_gap_conn_find(conn_handle, &desc) != 0) {
+        return;
+    }
+    const uint8_t *a = desc.peer_id_addr.val;
+    ESP_LOGI(TAG, "%s (conn=%d): peer id %02x:%02x:%02x:%02x:%02x:%02x (type %d)",
+             when, conn_handle, a[5], a[4], a[3], a[2], a[1], a[0],
+             desc.peer_id_addr.type);
+}
+
 static int ble_gap_event(struct ble_gap_event *event, void *arg)
 {
     switch (event->type) {
@@ -203,6 +276,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
             ESP_LOGI(TAG, "host connected (conn=%d) -> slot %d",
                      event->connect.conn_handle, s ? (int)(s - s_hosts) : -1);
             log_conn_params("conn params", event->connect.conn_handle);
+            log_peer_id("connect", event->connect.conn_handle);
         } else {
             ESP_LOGW(TAG, "connect failed; status=%d", event->connect.status);
             // A connection that dies during establishment gets a failed CONNECT
@@ -261,6 +335,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
                  event->enc_change.conn_handle, event->enc_change.status,
                  rc == 0 ? desc.sec_state.encrypted : -1,
                  rc == 0 ? desc.sec_state.bonded : -1);
+        log_peer_id("bonded", event->enc_change.conn_handle);
         return 0;
     }
 

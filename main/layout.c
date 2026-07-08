@@ -2,9 +2,9 @@
 
 #include "our_descriptor.h"   // ABS_AXIS_MAX
 
-// Host slots. NOTE: slots are assigned in BLE connection order (see ble_hid.c), so
-// this hard-codes the assumption that the Mac connects first (slot 0) and the PC
-// second (slot 1). A future configurator will bind displays to hosts by identity.
+// Host slots. ble_hid.c pins each machine to a fixed slot by its BLE identity (the
+// Mac to SLOT_MAC), so these indices are stable regardless of connection order — the
+// Mac is always HOST_MAC. Keep HOST_MAC in sync with SLOT_MAC in ble_hid.c.
 #define HOST_MAC 0
 #define HOST_PC  1
 

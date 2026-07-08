@@ -89,13 +89,12 @@ don't hand-build the GATT attribute table. `esp_hid`'s device layer is single-ho
 in `ble_hid.c` is ours regardless.
 
 The HID report map in `our_descriptor.c` is the **external contract** the hosts pair
-against: mouse report id 1 (absolute X/Y plus a relative scroll wheel), keyboard
-report id 2, and a relative-pointer report id 3 (relative X/Y, used to nudge the
-cursor across a same-host display seam — see `kvm.c` / `layout.c`). The base
-mouse+keyboard map is proven on macOS + Windows; the scroll wheel and the relative
-pointer are verified on macOS but **not yet re-tested on Windows**. Don't change it
-without re-testing both — and see gotcha #9: a changed map needs a host cache flush,
-not just a re-pair.
+against: mouse report id 1 (buttons + absolute X/Y + a relative scroll wheel),
+keyboard report id 2, and a relative-pointer report id 3 (buttons + relative X/Y, used
+to nudge the cursor across a same-host display seam — see `kvm.c` / `layout.c`). On
+macOS, once both an absolute and a relative pointer are present, clicks are routed to
+the relative pointer, so `kvm.c` mirrors button changes onto report 3. The
+mouse+keyboard map and the scroll wheel are proven on macOS + Windows.
 
 ## BLE gotchas (read before touching `ble_hid.c` or the BLE `sdkconfig`)
 
@@ -176,6 +175,11 @@ on macOS or only with two hosts.
    motion/buttons/keys are all fine. This is what made the scroll wheel look broken
    even though the device was already sending correct 6-byte reports.
 
+   **Windows caches it too** (per bond, not just macOS): the scroll wheel did nothing
+   on Windows until the device was removed and re-paired, after which it worked
+   immediately. Same flush — Remove device, toggle the Bluetooth radio (or uninstall
+   the stale HID entry in Device Manager with *show hidden devices*), then re-pair.
+
 ## Observing BLE from the dev Mac
 
 The Mac running the toolchain is also one of the two KVM hosts, so both ends of a BLE
@@ -197,5 +201,5 @@ problem are observable locally:
 | `cursor.c` | the single active cursor in global desk points; sustained any-edge push detection |
 | `layout.c` | the desk model: display rectangles in one global coordinate space, each owned by a host; edge adjacency + the abs/relative crossing geometry. Currently hard-coded to "Config A" |
 | `kvm.c` | routes input through the desk; on an edge push crosses the cursor to the neighbouring display — relative nudge within a host (slot 0 = Mac), host switch between computers (slot 1 = PC) |
-| `ble_hid.c` | NimBLE HOGP peripheral: advertising, bonding, 2-slot connection layer, per-host report senders (abs mouse, keyboard, relative pointer) |
+| `ble_hid.c` | NimBLE HOGP peripheral: advertising, bonding, 2-slot connection layer (each host pinned to a slot by BLE identity), per-host report senders (abs mouse, keyboard, relative pointer) |
 | `our_descriptor.c` | HID report map (mouse id 1 + wheel, keyboard id 2, relative pointer id 3) — the external contract |
