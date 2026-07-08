@@ -88,13 +88,27 @@ don't hand-build the GATT attribute table. `esp_hid`'s device layer is single-ho
 *both* stacks ("there can be only one BLE HID device"), so the connection/send layer
 in `ble_hid.c` is ours regardless.
 
-The HID report map in `our_descriptor.c` is the **external contract** the hosts pair
-against: mouse report id 1 (buttons + absolute X/Y + a relative scroll wheel),
-keyboard report id 2, and a relative-pointer report id 3 (buttons + relative X/Y, used
-to nudge the cursor across a same-host display seam — see `kvm.c` / `layout.c`). On
-macOS, once both an absolute and a relative pointer are present, clicks are routed to
-the relative pointer, so `kvm.c` mirrors button changes onto report 3. The
-mouse+keyboard map and the scroll wheel are proven on macOS + Windows.
+The HID report maps in `our_descriptor.c` are the **external contract** the hosts
+pair against, split across **two HID service instances**: instance one is the mouse
+(report id 1: buttons + absolute X/Y + a relative scroll wheel) + keyboard (id 2);
+instance two is a motion-only relative pointer (id 3, relative X/Y, used to nudge
+the cursor across a same-host display seam — see `kvm.c` / `layout.c`). Two macOS
+behaviours force that shape, both established by A/B testing on this device:
+
+- **The relative pointer must live in a separate HID service.** If an absolute and
+  a relative pointer share one HID device, macOS moves the cursor and clicks but
+  never synthesises a drag from the absolute report's motion — the identical map
+  minus the relative collection drags fine. DeskHop dodges the same trap on USB by
+  putting its relative helper mouse on a separate interface; separate HOGP service
+  instances are the BLE equivalent (NimBLE supports them natively;
+  `CONFIG_BT_NIMBLE_SVC_HID_MAX_INSTANCES=2`).
+- **Report 3 must stay button-less.** When it had buttons (while still sharing one
+  device), macOS elected the *relative* pointer the click owner and ignored report
+  1's buttons; mirroring clicks onto report 3 recovered the click but not
+  click-and-drag, because macOS won't fuse a button held on one pointer with motion
+  arriving on the other. Buttons ride report 1 only.
+
+The mouse+keyboard map and the scroll wheel are proven on macOS + Windows.
 
 ## BLE gotchas (read before touching `ble_hid.c` or the BLE `sdkconfig`)
 
@@ -144,10 +158,11 @@ on macOS or only with two hosts.
 
 6. **Report value handles are captured by registration order** in
    `gatt_svr_register_cb` — the report characteristics all share UUID 0x2A4D, and
-   register in the order they're listed in `params.rpts[]`: 0 = mouse input, 1 =
-   keyboard input, 2 = keyboard LED output, 3 = relative-pointer input. The mouse and
-   keyboard handles are asserted non-zero at host sync (the relative-pointer handle is
-   logged, not asserted).
+   register in the order the two HID service instances list them in `params.rpts[]`:
+   0 = mouse input, 1 = keyboard input, 2 = keyboard LED output (instance one), then
+   3 = relative-pointer input (instance two). The mouse and keyboard handles are
+   asserted non-zero at host sync (the relative-pointer handle is logged, not
+   asserted).
 
 7. **NimBLE log spam.** At INFO level NimBLE logs one line per notification, flooding
    UART0 on every mouse move. Pinned to WARNING (`CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING`);
@@ -202,4 +217,4 @@ problem are observable locally:
 | `layout.c` | the desk model: display rectangles in one global coordinate space, each owned by a host; edge adjacency + the abs/relative crossing geometry. Currently hard-coded to "Config A" |
 | `kvm.c` | routes input through the desk; on an edge push crosses the cursor to the neighbouring display — relative nudge within a host (slot 0 = Mac), host switch between computers (slot 1 = PC) |
 | `ble_hid.c` | NimBLE HOGP peripheral: advertising, bonding, 2-slot connection layer (each host pinned to a slot by BLE identity), per-host report senders (abs mouse, keyboard, relative pointer) |
-| `our_descriptor.c` | HID report map (mouse id 1 + wheel, keyboard id 2, relative pointer id 3) — the external contract |
+| `our_descriptor.c` | HID report maps, two HID service instances (mouse id 1 + wheel & keyboard id 2; relative pointer id 3 separate) — the external contract |

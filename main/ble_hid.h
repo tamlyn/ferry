@@ -33,10 +33,11 @@ esp_err_t ble_hid_send_mouse(int host, uint8_t buttons, uint16_t x, uint16_t y, 
 
 // Send a *relative* pointer report (report id 3) to host `host` — a signed dx/dy
 // delta, the only motion that crosses a display boundary that absolute positioning
-// is clamped within. Dropped if the host hasn't subscribed to the relative report.
-// The KVM uses it to walk the cursor onto an adjacent display, after which absolute
-// positioning re-sticks there.
-esp_err_t ble_hid_send_mouse_rel(int host, uint8_t buttons, int8_t dx, int8_t dy);
+// is clamped within. Motion only: buttons ride the absolute report, and report 3
+// must not carry any (see our_descriptor.c). Dropped if the host hasn't subscribed
+// to the relative report. The KVM uses it to walk the cursor onto an adjacent
+// display, after which absolute positioning re-sticks there.
+esp_err_t ble_hid_send_mouse_rel(int host, int8_t dx, int8_t dy);
 
 // Send a boot-keyboard report to host `host`: a modifier bitmask plus up to six
 // concurrent keycodes (0 = unused slot).

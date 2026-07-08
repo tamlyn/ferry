@@ -30,8 +30,8 @@ static const char *TAG = "kvm";
 // display (and host) it is on. s_os_disp remembers, per host, which of that host's
 // displays its OS cursor is parked on — needed because absolute positioning only
 // addresses a host's *current* display, so reaching any other display of that host
-// needs a nudge. s_buttons is the last button state, carried through crossings and
-// mirrored onto the relative report. -1 = display not yet known.
+// needs a nudge. s_buttons is the last button state, re-asserted by a crossing's
+// pre-position report so a held drag survives it. -1 = display not yet known.
 static cursor_t s_cursor;
 static int s_active_host = -1;
 static int s_active_disp = -1;
@@ -62,15 +62,15 @@ static int pick_ready(void)
     return -1;
 }
 
-// Walk a host's cursor with a burst of relative motion, holding the current button
-// state so a drag survives the crossing. Blocks the caller (the USB input task) for
-// the burst; acceptable for a deliberate, occasional crossing.
+// Walk a host's cursor with a burst of relative motion. The relative report carries
+// no buttons, so the host's button state (last sent on the absolute report) rides
+// through untouched. Blocks the caller (the USB input task) for the burst;
+// acceptable for a deliberate, occasional crossing.
 static void nudge_burst(int host, int ax, int ay, int counts)
 {
     int reports = counts / NUDGE_STEP;
     for (int i = 0; i < reports; i++) {
-        ble_hid_send_mouse_rel(host, s_buttons,
-                               (int8_t)(ax * NUDGE_STEP), (int8_t)(ay * NUDGE_STEP));
+        ble_hid_send_mouse_rel(host, (int8_t)(ax * NUDGE_STEP), (int8_t)(ay * NUDGE_STEP));
         vTaskDelay(pdMS_TO_TICKS(NUDGE_STEP_MS));
     }
 }
@@ -155,15 +155,7 @@ void kvm_on_mouse(uint8_t buttons, int dx, int dy, int wheel)
     uint16_t ax, ay;
     layout_to_abs(s_active_disp, s_cursor.x, s_cursor.y, &ax, &ay);
     ble_hid_send_mouse(s_active_host, buttons, ax, ay, (int8_t)wheel);
-
-    // macOS binds clicks to the relative pointer (report 3) when the device exposes
-    // both an absolute and a relative pointer, so mirror button changes onto it —
-    // otherwise clicks (which ride the absolute report) are dropped on the Mac.
-    // Windows reads the absolute report's buttons and is unaffected either way.
-    if (buttons != s_buttons) {
-        ble_hid_send_mouse_rel(s_active_host, buttons, 0, 0);
-        s_buttons = buttons;
-    }
+    s_buttons = buttons;
 }
 
 void kvm_on_keyboard(uint8_t modifiers, const uint8_t keys[6])

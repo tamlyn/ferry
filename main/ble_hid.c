@@ -370,9 +370,10 @@ static void gatt_svr_register_cb(struct ble_gatt_register_ctxt *ctxt, void *arg)
     if (ble_uuid_u16(ctxt->chr.chr_def->uuid) != BLE_SVC_HID_CHR_UUID16_RPT) {
         return;
     }
-    // Report characteristics register in the order we populate params.rpts[]:
-    // 0 = mouse input (id 1), 1 = keyboard input (id 2), 2 = keyboard LED output,
-    // 3 = relative-pointer input (id 3).
+    // Report characteristics register in the order the two service instances
+    // list them in params.rpts[]: 0 = mouse input (id 1), 1 = keyboard input
+    // (id 2), 2 = keyboard LED output — all in instance one — then 3 =
+    // relative-pointer input (id 3) in instance two.
     switch (s_report_chr_seen++) {
     case 0:
         s_mouse_val_handle = ctxt->chr.val_handle;
@@ -390,20 +391,23 @@ static void gatt_svr_register_cb(struct ble_gatt_register_ctxt *ctxt, void *arg)
 
 static void hid_service_add(void)
 {
-    // ~1.3 KB — keep it off the (modest) main-task stack.
+    // ~1.3 KB — keep it off the (modest) main-task stack. ble_svc_hid_add()
+    // copies it, so it is safely reused for the second instance.
     static struct ble_svc_hid_params params;
+
+    // Instance one: absolute mouse + keyboard. The relative pointer is
+    // deliberately NOT in this device — macOS won't synthesise drags from an
+    // absolute pointer's motion if the same HID device also contains a relative
+    // pointer collection, so it gets its own service instance below (the BLE
+    // equivalent of DeskHop's separate USB interface; see our_descriptor.c).
     memset(&params, 0, sizeof(params));
-
     memcpy(&params.hid_info, HID_INFO, sizeof(HID_INFO));   // hid_info is a uint32_t
-
     memcpy(params.report_map, our_report_descriptor, our_report_descriptor_length);
     params.report_map_len = our_report_descriptor_length;
     // External Report Reference points at the Battery Service (HOGP convention).
     params.external_rpt_ref = BLE_SVC_BAS_UUID16;
-
     params.proto_mode_present = 1;
     params.proto_mode = BLE_SVC_HID_PROTO_MODE_REPORT;
-
     // Report-mode characteristics, in the order gatt_svr_register_cb expects.
     params.rpts[0] = (struct report){
         .type = BLE_SVC_HID_RPT_TYPE_INPUT,  .id = REPORT_ID_MOUSE,    .len = MOUSE_REPORT_SIZE };
@@ -411,11 +415,22 @@ static void hid_service_add(void)
         .type = BLE_SVC_HID_RPT_TYPE_INPUT,  .id = REPORT_ID_KEYBOARD, .len = KEYBOARD_REPORT_SIZE };
     params.rpts[2] = (struct report){
         .type = BLE_SVC_HID_RPT_TYPE_OUTPUT, .id = REPORT_ID_KEYBOARD, .len = 1 };
-    params.rpts[3] = (struct report){   // relative pointer, registers 4th (case 3)
-        .type = BLE_SVC_HID_RPT_TYPE_INPUT,  .id = REPORT_ID_MOUSE_REL, .len = MOUSE_REL_REPORT_SIZE };
-    params.rpts_len = 4;
-
+    params.rpts_len = 3;
     int rc = ble_svc_hid_add(params);
+    assert(rc == 0);
+
+    // Instance two: the relative pointer, alone.
+    memset(&params, 0, sizeof(params));
+    memcpy(&params.hid_info, HID_INFO, sizeof(HID_INFO));
+    memcpy(params.report_map, our_rel_report_descriptor, our_rel_report_descriptor_length);
+    params.report_map_len = our_rel_report_descriptor_length;
+    params.external_rpt_ref = BLE_SVC_BAS_UUID16;
+    params.proto_mode_present = 1;
+    params.proto_mode = BLE_SVC_HID_PROTO_MODE_REPORT;
+    params.rpts[0] = (struct report){   // registers 4th overall (case 3)
+        .type = BLE_SVC_HID_RPT_TYPE_INPUT,  .id = REPORT_ID_MOUSE_REL, .len = MOUSE_REL_REPORT_SIZE };
+    params.rpts_len = 1;
+    rc = ble_svc_hid_add(params);
     assert(rc == 0);
 }
 
@@ -559,7 +574,7 @@ esp_err_t ble_hid_send_mouse(int host, uint8_t buttons, uint16_t x, uint16_t y, 
     return ESP_OK;
 }
 
-esp_err_t ble_hid_send_mouse_rel(int host, uint8_t buttons, int8_t dx, int8_t dy)
+esp_err_t ble_hid_send_mouse_rel(int host, int8_t dx, int8_t dy)
 {
     if (host < 0 || host >= BLE_HID_MAX_HOSTS) {
         return ESP_ERR_INVALID_ARG;
@@ -569,7 +584,7 @@ esp_err_t ble_hid_send_mouse_rel(int host, uint8_t buttons, int8_t dx, int8_t dy
         return ESP_ERR_INVALID_STATE;
     }
 
-    uint8_t report[MOUSE_REL_REPORT_SIZE] = { buttons, (uint8_t)dx, (uint8_t)dy };
+    uint8_t report[MOUSE_REL_REPORT_SIZE] = { (uint8_t)dx, (uint8_t)dy };
     struct os_mbuf *om = ble_hs_mbuf_from_flat(report, sizeof(report));
     if (om == NULL) {
         return ESP_ERR_NO_MEM;

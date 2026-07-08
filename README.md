@@ -75,15 +75,21 @@ Input flows through these stages:
    notification state independently — the property that lets two computers subscribe
    to the same device at once.
 
-The HID report layout (`our_descriptor.c`) is the device's external contract. The base
-mouse + keyboard map is proven on both macOS and Windows; the scroll wheel and the
-relative pointer are verified on macOS but not yet re-tested on Windows:
+The HID report layout (`our_descriptor.c`) is the device's external contract,
+split across two HID service instances:
 
 | Report | Fields |
 |--------|--------|
 | Mouse (id 1) | 8 buttons; 16-bit **absolute** X and Y (0…32767); 8-bit relative scroll wheel |
 | Keyboard (id 2) | modifier bitmask; up to 6 concurrent keycodes; LED output (Caps/Num Lock) |
-| Relative pointer (id 3) | 8 buttons; 8-bit **relative** X and Y — nudges the cursor across a same-host display seam |
+| Relative pointer (id 3, own HID service) | 8-bit **relative** X and Y, no buttons — nudges the cursor across a same-host display seam |
+
+The relative pointer's isolation is deliberate, twice over: macOS won't
+synthesise drags from an absolute pointer's motion if the same HID device also
+contains a relative pointer collection (so it lives in its own HID service —
+the Bluetooth equivalent of a separate USB interface), and if it carried
+buttons macOS would elect it the click owner and stop honouring clicks on the
+absolute report (so the buttons live in the mouse report only).
 
 ## Pairing and use
 
