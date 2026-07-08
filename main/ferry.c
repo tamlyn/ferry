@@ -1,4 +1,4 @@
-// Screen Hopper (ESP32-S3) — M3: USB input → absolute cursor → BLE HID KVM.
+// Ferry (ESP32-S3) — M3: USB input → absolute cursor → BLE HID KVM.
 //
 // A USB mouse and keyboard (via a hub) are hosted and re-transmitted over BLE HID
 // to up to two paired computers at once. The KVM brain routes input to whichever
@@ -15,7 +15,7 @@
 #include "kvm.h"
 #include "usb_input.h"
 
-static const char *TAG = "screenhopper";
+static const char *TAG = "ferry";
 
 // A USB mouse report: hand the relative delta + button + wheel state to the KVM,
 // which moves the active host's cursor (hopping between hosts at the screen
@@ -33,7 +33,7 @@ static void on_keyboard(uint8_t modifiers, const uint8_t keys[6])
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Screen Hopper (ESP32-S3) — M3: USB → absolute cursor → BLE HID KVM");
+    ESP_LOGI(TAG, "Ferry (ESP32-S3) — M3: USB → absolute cursor → BLE HID KVM");
 
     // NVS holds the BLE bonding keys, so paired hosts reconnect without re-pairing.
     esp_err_t ret = nvs_flash_init();

@@ -1,4 +1,4 @@
-# Screen Hopper — developer notes
+# Ferry — developer notes
 
 ESP32-S3 firmware for a no-host-software wireless KVM: USB mouse + keyboard in, BLE
 HID out to **two computers at once**, cursor hops between them by absolute
@@ -89,10 +89,13 @@ don't hand-build the GATT attribute table. `esp_hid`'s device layer is single-ho
 in `ble_hid.c` is ours regardless.
 
 The HID report map in `our_descriptor.c` is the **external contract** the hosts pair
-against (mouse report id 1 with absolute X/Y plus a relative scroll wheel; keyboard
-report id 2). The base map is proven on macOS + Windows; the scroll wheel is verified
-on macOS but **not yet re-tested on Windows**. Don't change it without re-testing both
-— and see gotcha #9: a changed map needs a host cache flush, not just a re-pair.
+against: mouse report id 1 (absolute X/Y plus a relative scroll wheel), keyboard
+report id 2, and a relative-pointer report id 3 (relative X/Y, used to nudge the
+cursor across a same-host display seam — see `kvm.c` / `layout.c`). The base
+mouse+keyboard map is proven on macOS + Windows; the scroll wheel and the relative
+pointer are verified on macOS but **not yet re-tested on Windows**. Don't change it
+without re-testing both — and see gotcha #9: a changed map needs a host cache flush,
+not just a re-pair.
 
 ## BLE gotchas (read before touching `ble_hid.c` or the BLE `sdkconfig`)
 
@@ -109,8 +112,9 @@ on macOS or only with two hosts.
    satisfies it.
 
 2. **Bond/CCCD store overflow silently unpairs a live host.** Each bonded host stores
-   4 CCCDs (service-changed, battery, mouse report, keyboard report). The NimBLE
-   defaults (3 bonds / 8 CCCDs) sit *exactly* at two hosts' worth. When the store
+   5 CCCDs (service-changed, battery, mouse report, keyboard report, relative-pointer
+   report), so two hosts need 10 — already past the NimBLE default 8-CCCD store, and
+   the default 3-bond limit leaves only one host of headroom. When the store
    overflows, `ble_store_util_status_rr` deletes the **oldest** peer — so one stray
    third pairing (e.g. re-pairing a host under a new identity address) evicts a real
    host's bond behind its back. That host keeps *its* keys, fails encryption on
@@ -132,7 +136,7 @@ on macOS or only with two hosts.
    the reconnect storm also crowds out any fresh pairing. Fix: **forget the device on
    every host**, one at a time — turn the *other* host's Bluetooth off so its storm
    doesn't interfere — then pair fresh. Success in the log looks like
-   `status=0 encrypted=1 bonded=1` followed by `subscribe … mouse=1 kbd=1`.
+   `status=0 encrypted=1 bonded=1` followed by `subscribe … mouse=1 kbd=1 rel=1`.
 
 5. **Advertising while connected works.** Restart advertising in the CONNECT handler
    whenever a slot is still free, so a second host can find us — NimBLE stops
@@ -142,7 +146,9 @@ on macOS or only with two hosts.
 6. **Report value handles are captured by registration order** in
    `gatt_svr_register_cb` — the report characteristics all share UUID 0x2A4D, and
    register in the order they're listed in `params.rpts[]`: 0 = mouse input, 1 =
-   keyboard input, 2 = keyboard LED output. Asserted non-zero at host sync.
+   keyboard input, 2 = keyboard LED output, 3 = relative-pointer input. The mouse and
+   keyboard handles are asserted non-zero at host sync (the relative-pointer handle is
+   logged, not asserted).
 
 7. **NimBLE log spam.** At INFO level NimBLE logs one line per notification, flooding
    UART0 on every mouse move. Pinned to WARNING (`CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING`);
@@ -176,19 +182,20 @@ The Mac running the toolchain is also one of the two KVM hosts, so both ends of 
 problem are observable locally:
 
 - **Is the device advertising?** A short Swift CoreBluetooth scanner (`swift
-  scan.swift`, needs Bluetooth TCC — run outside the sandbox) sees the "Screen Hopper"
+  scan.swift`, needs Bluetooth TCC — run outside the sandbox) sees the "Ferry"
   advert within seconds. Ground truth when the firmware's "advertising" log is in
   doubt.
-- **Is the Mac bonded/connected?** `system_profiler SPBluetoothDataType` lists Screen
-  Hopper (address `68:EE:8F:63:97:32`) under Connected / Not Connected.
+- **Is the Mac bonded/connected?** `system_profiler SPBluetoothDataType` lists Ferry
+  (address `68:EE:8F:63:97:32`) under Connected / Not Connected.
 
 ## Source layout (`main/`)
 
 | File | Role |
 |------|------|
-| `screenhopper.c` | app entry; wires USB input → KVM |
-| `usb_input.c` | USB host + HID boot-protocol decode (mouse + keyboard via hub) |
-| `cursor.c` | absolute cursor model; sustained edge-push detection |
-| `kvm.c` | active-host routing + edge-push hop (slot 0 = left, slot 1 = right) |
-| `ble_hid.c` | NimBLE HOGP peripheral: advertising, bonding, 2-slot connection layer, per-host report senders |
-| `our_descriptor.c` | HID report map — the external contract |
+| `ferry.c` | app entry; wires USB input → KVM |
+| `usb_input.c` | USB host + HID boot-protocol decode (mouse + keyboard via hub; wheel read from the boot report's 4th byte) |
+| `cursor.c` | the single active cursor in global desk points; sustained any-edge push detection |
+| `layout.c` | the desk model: display rectangles in one global coordinate space, each owned by a host; edge adjacency + the abs/relative crossing geometry. Currently hard-coded to "Config A" |
+| `kvm.c` | routes input through the desk; on an edge push crosses the cursor to the neighbouring display — relative nudge within a host (slot 0 = Mac), host switch between computers (slot 1 = PC) |
+| `ble_hid.c` | NimBLE HOGP peripheral: advertising, bonding, 2-slot connection layer, per-host report senders (abs mouse, keyboard, relative pointer) |
+| `our_descriptor.c` | HID report map (mouse id 1 + wheel, keyboard id 2, relative pointer id 3) — the external contract |

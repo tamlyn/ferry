@@ -34,7 +34,7 @@
 
 static const char *TAG = "ble_hid";
 
-#define DEVICE_NAME "Screen Hopper"
+#define DEVICE_NAME "Ferry"
 
 // HID appearance (0x03C0 = HID Generic), advertised so hosts recognise us as a
 // combined mouse+keyboard HID peripheral.

@@ -1,4 +1,4 @@
-idf_component_register(SRCS "screenhopper.c"
+idf_component_register(SRCS "ferry.c"
                             "ble_hid.c"
                             "cursor.c"
                             "kvm.c"
