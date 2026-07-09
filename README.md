@@ -10,6 +10,9 @@ chosen because the ESP32-S3 has a native USB host controller — the one capabil
 plain Bluetooth microcontroller lacks, and the reason a wired mouse and keyboard can
 be read at all.
 
+![Ferry hardware: an ESP32-S3 dev board with USB power and USB host ports, connected
+to a USB hub carrying a keyboard and a mouse](Ferry.jpg)
+
 ## What it does
 
 - Hosts a real USB mouse + keyboard, directly or through a hub.
