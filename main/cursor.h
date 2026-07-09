@@ -11,6 +11,7 @@
 // to a neighbouring display.
 typedef struct {
     int32_t x, y;        // position in global desk points
+    int32_t acc_x, acc_y;// sub-point remainder from acceleration scaling (1/256 pt)
     int32_t push;        // overshoot accumulated against push_edge
     edge_t  push_edge;   // the edge currently being pushed into
 } cursor_t;

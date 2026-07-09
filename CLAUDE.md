@@ -213,7 +213,7 @@ problem are observable locally:
 |------|------|
 | `ferry.c` | app entry; wires USB input → KVM |
 | `usb_input.c` | USB host + HID boot-protocol decode (mouse + keyboard via hub; wheel read from the boot report's 4th byte) |
-| `cursor.c` | the single active cursor in global desk points; sustained any-edge push detection |
+| `cursor.c` | the single active cursor in global desk points; speed-based pointer acceleration (slow = precise, fast = 1:1); sustained any-edge push detection |
 | `layout.c` | the desk model: display rectangles in one global coordinate space, each owned by a host; edge adjacency + the abs/relative crossing geometry. Currently hard-coded to "Config A" |
 | `kvm.c` | routes input through the desk; on an edge push crosses the cursor to the neighbouring display — relative nudge within a host (slot 0 = Mac), host switch between computers (slot 1 = PC) |
 | `ble_hid.c` | NimBLE HOGP peripheral: advertising, bonding, 2-slot connection layer (each host pinned to a slot by BLE identity), per-host report senders (abs mouse, keyboard, relative pointer) |
