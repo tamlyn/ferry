@@ -26,6 +26,20 @@ static const char *TAG = "kvm";
                                // display edges resisting it).
 #define PREPOS_SETTLE_MS  15   // let the host apply the pre-position before nudging
 
+// The MX Master's gesture paddle arrives as button 6 (bit 5). Rather than forward it
+// as a raw button the host has no default action for, Ferry turns a paddle *press*
+// into the active host's desktop-overview gesture: macOS Mission Control (Ctrl+Up)
+// or Windows Task View (Win+Tab). Ctrl+Up is the stock macOS shortcut — the dedicated
+// Mission Control key is a Consumer-page usage our boot keyboard can't send, and it
+// relies on that shortcut being enabled (System Settings > Keyboard > Shortcuts).
+// The Mac is always host slot 0 (HOST_MAC in layout.c / SLOT_MAC in ble_hid.c).
+#define BTN_PADDLE  0x20
+#define HOST_MAC    0
+#define MOD_LCTRL   0x01
+#define MOD_LGUI    0x08
+#define KEY_UP      0x52
+#define KEY_TAB     0x2B
+
 // The one active cursor lives in global desk points; s_active_disp/host say which
 // display (and host) it is on. s_os_disp remembers, per host, which of that host's
 // displays its OS cursor is parked on — needed because absolute positioning only
@@ -37,6 +51,7 @@ static int s_active_host = -1;
 static int s_active_disp = -1;
 static int s_os_disp[BLE_HID_MAX_HOSTS];
 static uint8_t s_buttons;
+static bool s_paddle_down;   // previous gesture-paddle state, for press-edge detection
 
 // A layout switch requested from another task (e.g. control.c's button). Applied on
 // the input task at the next report — see apply_pending_layout. -1 = nothing pending.
@@ -164,6 +179,21 @@ static void cross_to(int nd)
     cursor_init(&s_cursor, ex, ey);
 }
 
+// Fire the active host's desktop-overview shortcut as a brief keyboard chord. Blocks
+// the input task ~20 ms for the press then release, like a seam nudge — fine for a
+// human-paced button. A held physical modifier is momentarily cleared by the release
+// and restored by the keyboard's next report; not worth tracking for a rare press.
+static void send_overview(int host)
+{
+    uint8_t mod = (host == HOST_MAC) ? MOD_LCTRL : MOD_LGUI;
+    uint8_t key = (host == HOST_MAC) ? KEY_UP    : KEY_TAB;
+    const uint8_t press[6]   = { key, 0, 0, 0, 0, 0 };
+    const uint8_t release[6] = { 0 };
+    ble_hid_send_keyboard(host, mod, press);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    ble_hid_send_keyboard(host, 0, release);
+}
+
 void kvm_on_mouse(uint8_t buttons, int dx, int dy, int wheel, int pan)
 {
     apply_pending_layout();
@@ -183,10 +213,21 @@ void kvm_on_mouse(uint8_t buttons, int dx, int dy, int wheel, int pan)
         }
     }
 
+    // The gesture paddle (button 6) drives desktop overview, not a raw button — fire
+    // it on the press edge and mask it out so the host never sees it as a click.
+    bool paddle_pressed = (buttons & BTN_PADDLE) && !s_paddle_down;
+    s_paddle_down = buttons & BTN_PADDLE;
+    buttons &= ~BTN_PADDLE;
+
     uint16_t ax, ay;
     layout_to_abs(s_active_disp, s_cursor.x, s_cursor.y, &ax, &ay);
     ble_hid_send_mouse(s_active_host, buttons, ax, ay, (int8_t)wheel, (int8_t)pan);
     s_buttons = buttons;
+
+    // After the position report, so the ~20 ms chord doesn't delay the cursor.
+    if (paddle_pressed) {
+        send_overview(s_active_host);
+    }
 }
 
 void kvm_on_keyboard(uint8_t modifiers, const uint8_t keys[6])

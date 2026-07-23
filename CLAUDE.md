@@ -110,8 +110,11 @@ hosting an MX Master 3S:
 
 - **MX Master 3S map (report id 2, 9 bytes on the wire):** buttons byte — bit0 L,
   bit1 R, bit2 middle, bit3 **back**, bit4 **forward**, bit5 **gesture paddle**
-  (button 6); then 16-bit rel X, 16-bit rel Y, 8-bit wheel, 8-bit AC Pan. The gesture
-  paddle *is* forwarded (button 6) but macOS has no default action for it.
+  (button 6); then 16-bit rel X, 16-bit rel Y, 8-bit wheel, 8-bit AC Pan. `kvm.c`
+  consumes button 6 (masks it out of the forwarded report) and turns a press into the
+  active host's desktop overview — macOS Mission Control (Ctrl+Up, needs that stock
+  shortcut enabled) or Windows Task View (Win+Tab) — since neither OS acts on a raw
+  button 6 and Karabiner can't remap a BLE device.
 
 - **Adding AC Pan grew the mouse report 6→7 bytes**, which is a report-map change:
   extra *buttons* work without re-pairing (byte 0 is unchanged, the map already
