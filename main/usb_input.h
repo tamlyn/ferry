@@ -8,10 +8,11 @@
 // Decoded HID input, delivered from the USB host driver's task. Keep handlers
 // light — they run on that task.
 //
-// buttons is a bitmask (bit0 = left, bit1 = right, bit2 = middle); dx/dy are
-// relative motion counts; wheel is the signed scroll delta (0 when the mouse
-// sent no wheel byte). keys holds up to six concurrent keycodes (0 = unused).
-typedef void (*usb_mouse_report_cb)(uint8_t buttons, int dx, int dy, int wheel);
+// buttons is a bitmask (bit0 = left, bit1 = right, bit2 = middle, bit3 = back,
+// bit4 = forward, bit5+ = extra); dx/dy are relative motion counts; wheel is the
+// signed vertical scroll delta and pan the signed horizontal one (both 0 when
+// the mouse sent none). keys holds up to six concurrent keycodes (0 = unused).
+typedef void (*usb_mouse_report_cb)(uint8_t buttons, int dx, int dy, int wheel, int pan);
 typedef void (*usb_keyboard_report_cb)(uint8_t modifiers, const uint8_t keys[6]);
 
 // Start hosting USB HID: install the USB host + HID class driver and enumerate a

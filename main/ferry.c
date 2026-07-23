@@ -19,12 +19,12 @@
 
 static const char *TAG = "ferry";
 
-// A USB mouse report: hand the relative delta + button + wheel state to the KVM,
+// A USB mouse report: hand the relative delta + button + scroll state to the KVM,
 // which moves the active host's cursor (hopping between hosts at the screen
-// edges) and sends the absolute position (plus the wheel) on.
-static void on_mouse(uint8_t buttons, int dx, int dy, int wheel)
+// edges) and sends the absolute position (plus the wheel and pan) on.
+static void on_mouse(uint8_t buttons, int dx, int dy, int wheel, int pan)
 {
-    kvm_on_mouse(buttons, dx, dy, wheel);
+    kvm_on_mouse(buttons, dx, dy, wheel, pan);
 }
 
 // A USB keyboard report: the KVM routes it to the active host.

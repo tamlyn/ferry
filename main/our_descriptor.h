@@ -20,7 +20,7 @@
 
 // Payload sizes (excluding the report ID, which the GATT report characteristic
 // carries out of band).
-#define MOUSE_REPORT_SIZE     6   // 1 button byte + X(16) + Y(16) + wheel(8)
+#define MOUSE_REPORT_SIZE     7   // 1 button byte + X(16) + Y(16) + wheel(8) + pan(8)
 #define MOUSE_REL_REPORT_SIZE 2   // relX(8) + relY(8) — no buttons, by design
 #define KEYBOARD_REPORT_SIZE  8   // modifiers + reserved + 6 keycodes
 

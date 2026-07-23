@@ -1,17 +1,20 @@
-// USB host input: enumerate a boot-protocol mouse and/or keyboard (directly or
-// through a hub) and deliver decoded HID reports to the app via callbacks.
+// USB host input: enumerate a mouse and/or keyboard (directly or through a hub)
+// and deliver decoded HID reports to the app via callbacks.
 //
-// Devices are driven in the HID *boot* protocol: a mouse gives 8-bit relative
-// dx/dy + buttons, a keyboard gives modifiers + up to six keycodes. The spec's
-// boot mouse report is 3 bytes with no wheel, but nearly every real mouse
-// appends a signed wheel byte anyway, which we read opportunistically (see
-// dispatch_mouse_report). Full report-protocol parsing of a device's own
-// descriptor (extra buttons, horizontal pan, NKRO) is a later milestone.
+// The keyboard is driven in the HID *boot* protocol (modifiers + up to six
+// keycodes) — all we need, and universally supported. The mouse is driven in
+// *report* protocol: its own report descriptor is parsed (see mouse_fmt_parse)
+// to locate the button, X/Y, wheel and horizontal-pan fields, so extra buttons
+// (back/forward/gesture) and horizontal scroll come through — none of which the
+// 3-button boot report can carry. A mouse whose descriptor we cannot parse falls
+// back to the boot report (basic buttons + motion + wheel), so any mouse still
+// works.
 
 #include "usb_input.h"
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <string.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -60,29 +63,262 @@ static const char *proto_name(uint8_t proto)
     }
 }
 
+// -------------------------------------------- report-descriptor parsing
+
+// One field's location within a report body (bits, after any report-ID byte).
+typedef struct {
+    uint16_t bit_off;
+    uint8_t  bits;
+    bool     present;
+} field_t;
+
+// Where the fields we care about live in a mouse's input report.
+typedef struct {
+    bool     valid;
+    bool     has_id;      // report is prefixed by a 1-byte report ID
+    uint8_t  report_id;
+    field_t  buttons, x, y, wheel, pan;
+    uint16_t min_len;     // shortest report body we can decode (bytes)
+} mouse_fmt_t;
+
+// Walk a HID report descriptor and locate the mouse input report's fields.
+//
+// This is a deliberately small parser: it tracks just enough item state (usage
+// page, report size/count/id, and the current usage list) to assign each Input
+// field a bit offset, then picks the report ID that carries both X and Y as the
+// mouse report and records its button/X/Y/wheel/AC-pan fields. Fields that are
+// not byte-aligned (rare on real mice) are skipped, and a descriptor with no
+// X/Y returns false so the caller falls back to the boot report.
+static bool mouse_fmt_parse(const uint8_t *d, size_t n, mouse_fmt_t *out)
+{
+    memset(out, 0, sizeof(*out));
+
+    uint16_t usage_page = 0;
+    uint32_t rsize = 0, rcount = 0;
+    int      rid = 0;              // current report ID (0 = none declared)
+    bool     any_id = false;
+    uint32_t in_bit = 0;          // input-report bit offset within the current ID
+
+    uint32_t usages[16];
+    int      n_usages = 0;
+    uint32_t umin = 0;
+    bool     has_range = false;
+
+    enum { K_BTN, K_X, K_Y, K_WHEEL, K_PAN };
+    struct { int rid; uint32_t off; uint8_t bits; int kind; } cand[24];
+    int nc = 0;
+
+    size_t i = 0;
+    while (i < n) {
+        uint8_t p = d[i++];
+        if (p == 0xFE) {                       // long item — skip its payload
+            if (i >= n) break;
+            uint8_t dsize = d[i++];
+            i += (size_t)dsize + 1;
+            continue;
+        }
+        uint8_t bsize = p & 0x03;
+        if (bsize == 3) bsize = 4;
+        uint8_t btype = (p >> 2) & 0x03;
+        uint8_t btag  = (p >> 4) & 0x0F;
+        uint32_t val = 0;
+        for (int k = 0; k < bsize && i < n; k++) {
+            val |= (uint32_t)d[i++] << (8 * k);
+        }
+
+        if (btype == 1) {                      // Global
+            switch (btag) {
+            case 0x0: usage_page = (uint16_t)val; break;
+            case 0x7: rsize = val; break;
+            case 0x8: rid = (int)val; any_id = true; in_bit = 0; break;
+            case 0x9: rcount = val; break;
+            default: break;
+            }
+        } else if (btype == 2) {               // Local
+            switch (btag) {
+            case 0x0: if (n_usages < 16) usages[n_usages++] = val; break;
+            case 0x1: umin = val; has_range = true; break;
+            case 0x2: has_range = true; break;   // usage max: only the min matters here
+            default: break;
+            }
+        } else if (btype == 0) {               // Main
+            if (btag == 0x8) {                 // Input
+                if (usage_page == 0x09) {      // Button page — a button bitmap
+                    if (nc < 24) {
+                        cand[nc].rid = rid; cand[nc].off = in_bit;
+                        cand[nc].bits = (uint8_t)(rsize * rcount); cand[nc].kind = K_BTN;
+                        nc++;
+                    }
+                } else {
+                    for (uint32_t f = 0; f < rcount; f++) {
+                        uint32_t usage = (f < (uint32_t)n_usages) ? usages[f]
+                                       : (n_usages ? usages[n_usages - 1]
+                                       : (has_range ? umin + f : 0));
+                        int kind = -1;
+                        if (usage_page == 0x01) {
+                            if (usage == 0x30) kind = K_X;
+                            else if (usage == 0x31) kind = K_Y;
+                            else if (usage == 0x38) kind = K_WHEEL;
+                        } else if (usage_page == 0x0C && usage == 0x0238) {
+                            kind = K_PAN;
+                        }
+                        if (kind >= 0 && nc < 24) {
+                            cand[nc].rid = rid; cand[nc].off = in_bit + f * rsize;
+                            cand[nc].bits = (uint8_t)rsize; cand[nc].kind = kind;
+                            nc++;
+                        }
+                    }
+                }
+                in_bit += rsize * rcount;
+            }
+            // Every main item ends the current set of locals. (Output/Feature
+            // items live in separate reports, so they don't move in_bit.)
+            n_usages = 0; umin = 0; has_range = false;
+        }
+    }
+
+    // The mouse report is the one carrying both X and Y.
+    int mouse_rid = -1;
+    for (int a = 0; a < nc && mouse_rid < 0; a++) {
+        if (cand[a].kind != K_X) continue;
+        for (int b = 0; b < nc; b++) {
+            if (cand[b].kind == K_Y && cand[b].rid == cand[a].rid) {
+                mouse_rid = cand[a].rid;
+                break;
+            }
+        }
+    }
+    if (mouse_rid < 0) return false;
+
+    out->has_id = any_id;
+    out->report_id = (uint8_t)mouse_rid;
+    uint32_t min_bits = 0;
+    for (int a = 0; a < nc; a++) {
+        if (cand[a].rid != mouse_rid) continue;
+        field_t f = { (uint16_t)cand[a].off, cand[a].bits, true };
+        // Byte-aligned fields only, so decode can read whole bytes. Buttons need
+        // only an aligned start (they are read as up to two bytes).
+        if (f.bit_off & 7) continue;
+        if (cand[a].kind != K_BTN && (f.bits & 7)) continue;
+        switch (cand[a].kind) {
+        case K_BTN:   out->buttons = f; break;
+        case K_X:     out->x = f;       break;
+        case K_Y:     out->y = f;       break;
+        case K_WHEEL: out->wheel = f;   break;
+        case K_PAN:   out->pan = f;     break;
+        }
+        uint32_t end = (uint32_t)cand[a].off + cand[a].bits;
+        if (end > min_bits) min_bits = end;
+    }
+    out->min_len = (uint16_t)((min_bits + 7) / 8);
+    out->valid = out->x.present && out->y.present;
+    return out->valid;
+}
+
+// ---------------------------------------- per-interface decode selection
+
+typedef enum { DEV_KBD, DEV_MOUSE_BOOT, DEV_MOUSE_REPORT } dev_kind_t;
+
+typedef struct {
+    bool                     in_use;
+    hid_host_device_handle_t handle;
+    dev_kind_t               kind;
+    mouse_fmt_t              fmt;   // valid when kind == DEV_MOUSE_REPORT
+} hid_iface_t;
+
+#define MAX_HID_IFACES 6
+static hid_iface_t s_ifaces[MAX_HID_IFACES];
+
+static hid_iface_t *iface_find(hid_host_device_handle_t h)
+{
+    for (int i = 0; i < MAX_HID_IFACES; i++) {
+        if (s_ifaces[i].in_use && s_ifaces[i].handle == h) {
+            return &s_ifaces[i];
+        }
+    }
+    return NULL;
+}
+
+static hid_iface_t *iface_add(hid_host_device_handle_t h)
+{
+    hid_iface_t *d = iface_find(h);
+    if (d) return d;
+    for (int i = 0; i < MAX_HID_IFACES; i++) {
+        if (!s_ifaces[i].in_use) {
+            s_ifaces[i] = (hid_iface_t){ .in_use = true, .handle = h };
+            return &s_ifaces[i];
+        }
+    }
+    return NULL;
+}
+
+static void iface_remove(hid_host_device_handle_t h)
+{
+    hid_iface_t *d = iface_find(h);
+    if (d) *d = (hid_iface_t){0};
+}
+
 // ---------------------------------------------------------------- decoding
 
-static void dispatch_mouse_report(const uint8_t *data, size_t len)
+static int field_signed(const uint8_t *body, field_t f)
+{
+    if (!f.present) return 0;
+    uint16_t b = f.bit_off >> 3;
+    if (f.bits <= 8) {
+        return (int8_t)body[b];
+    }
+    return (int16_t)(body[b] | ((uint16_t)body[b + 1] << 8));
+}
+
+static uint16_t field_unsigned(const uint8_t *body, field_t f)
+{
+    if (!f.present) return 0;
+    uint16_t b = f.bit_off >> 3;
+    uint16_t v = body[b];
+    if (f.bits > 8) v |= (uint16_t)body[b + 1] << 8;
+    if (f.bits < 16) v &= (uint16_t)((1u << f.bits) - 1);
+    return v;
+}
+
+// Decode a report-protocol mouse report by the parsed field layout.
+static void dispatch_mouse_report(const uint8_t *data, size_t len, const mouse_fmt_t *f)
+{
+    if (s_on_mouse == NULL) return;
+
+    const uint8_t *body = data;
+    if (f->has_id) {
+        // The interface multiplexes several reports (mouse, consumer, system) by
+        // ID; ignore everything but the mouse report.
+        if (len == 0 || data[0] != f->report_id) return;
+        body = data + 1;
+        len -= 1;
+    }
+    if (len < f->min_len) return;
+
+    uint8_t buttons = (uint8_t)field_unsigned(body, f->buttons);
+    int dx    = field_signed(body, f->x);
+    int dy    = field_signed(body, f->y);
+    int wheel = field_signed(body, f->wheel);
+    int pan   = field_signed(body, f->pan);
+    s_on_mouse(buttons, dx, dy, wheel, pan);
+}
+
+// Decode a boot-protocol mouse report: 3 buttons + relative dx/dy, plus the
+// signed wheel byte nearly every mouse appends as a 4th byte.
+static void dispatch_mouse_boot(const uint8_t *data, size_t len)
 {
     if (len < sizeof(hid_mouse_input_report_boot_t) || s_on_mouse == NULL) {
         return;
     }
     const hid_mouse_input_report_boot_t *r =
         (const hid_mouse_input_report_boot_t *)data;
-
-    // Pack the boot report's button bits into a bitmask matching our BLE report
-    // (bit0 = left, bit1 = right, bit2 = middle).
     uint8_t buttons = (r->buttons.button1 ? 0x01 : 0) |
                       (r->buttons.button2 ? 0x02 : 0) |
                       (r->buttons.button3 ? 0x04 : 0);
-
-    // The 3-byte boot report carries no wheel, but nearly every mouse appends a
-    // signed wheel byte as a 4th byte. Read it when present; mice that omit it
-    // simply never scroll.
     int wheel = (len > sizeof(hid_mouse_input_report_boot_t))
                     ? (int8_t)data[sizeof(hid_mouse_input_report_boot_t)]
                     : 0;
-    s_on_mouse(buttons, r->x_displacement, r->y_displacement, wheel);
+    s_on_mouse(buttons, r->x_displacement, r->y_displacement, wheel, 0);
 }
 
 static void dispatch_keyboard_report(const uint8_t *data, size_t len)
@@ -113,17 +349,23 @@ static void hid_host_interface_callback(hid_host_device_handle_t handle,
         ESP_ERROR_CHECK(hid_host_device_get_raw_input_report_data(
             handle, data, sizeof(data), &len));
 
-        if (params.proto == HID_PROTOCOL_MOUSE) {
-            s_mouse_reports++;
-            dispatch_mouse_report(data, len);
-        } else if (params.proto == HID_PROTOCOL_KEYBOARD) {
-            s_kbd_reports++;
-            dispatch_keyboard_report(data, len);
+        if (params.proto == HID_PROTOCOL_MOUSE)         s_mouse_reports++;
+        else if (params.proto == HID_PROTOCOL_KEYBOARD) s_kbd_reports++;
+
+        hid_iface_t *d = iface_find(handle);
+        if (d == NULL) {
+            break;
+        }
+        switch (d->kind) {
+        case DEV_MOUSE_REPORT: dispatch_mouse_report(data, len, &d->fmt); break;
+        case DEV_MOUSE_BOOT:   dispatch_mouse_boot(data, len);            break;
+        case DEV_KBD:          dispatch_keyboard_report(data, len);       break;
         }
         break;
     }
     case HID_HOST_INTERFACE_EVENT_DISCONNECTED:
         ESP_LOGI(TAG, "%s disconnected", proto_name(params.proto));
+        iface_remove(handle);
         ESP_ERROR_CHECK(hid_host_device_close(handle));
         break;
     case HID_HOST_INTERFACE_EVENT_TRANSFER_ERROR:
@@ -136,11 +378,11 @@ static void hid_host_interface_callback(hid_host_device_handle_t handle,
     }
 }
 
-// A new device was connected. We only host boot-protocol mice and keyboards, so
-// ignore every other HID interface — a keyboard's extra media-key interface, a
-// mouse's vendor interface, a joystick. Besides being undecodable here, claiming
-// them ties up the ESP32-S3's limited USB host channels on pipes we never read,
-// which is exactly what starves a second device sharing a hub.
+// A new device was connected. We only host mice and keyboards, so ignore every
+// other HID interface — a keyboard's extra media-key interface, a mouse receiver's
+// vendor interface, a joystick. Besides being undecodable here, claiming them ties
+// up the ESP32-S3's limited USB host channels on pipes we never read, which is
+// exactly what starves a second device sharing a hub.
 //
 // A device we cannot drive — an unsupported low-speed device, a quirky one that
 // stalls a control transfer — must not take down the host: we log and skip just
@@ -168,23 +410,52 @@ static void handle_device_connected(hid_host_device_handle_t handle)
 
     // The device is open now, so every later failure must close it before
     // bailing out, or the handle leaks and the port never re-enumerates cleanly.
-    if (params.sub_class == HID_SUBCLASS_BOOT_INTERFACE) {
-        err = hid_class_request_set_protocol(handle, HID_REPORT_PROTOCOL_BOOT);
-        if (err == ESP_OK && params.proto == HID_PROTOCOL_KEYBOARD) {
-            err = hid_class_request_set_idle(handle, 0, 0);
+    dev_kind_t kind;
+    mouse_fmt_t fmt = {0};
+    if (params.proto == HID_PROTOCOL_MOUSE) {
+        // Report protocol + descriptor parse gets the extra buttons and
+        // horizontal scroll; a descriptor we cannot parse falls back to boot.
+        err = hid_class_request_set_protocol(handle, HID_REPORT_PROTOCOL_REPORT);
+        size_t desc_len = 0;
+        uint8_t *desc = (err == ESP_OK) ? hid_host_get_report_descriptor(handle, &desc_len) : NULL;
+        if (desc != NULL && mouse_fmt_parse(desc, desc_len, &fmt)) {
+            kind = DEV_MOUSE_REPORT;
+            ESP_LOGI(TAG, "mouse report id=%d: buttons@%d(%db) x@%d y@%d wheel@%d pan@%d",
+                     fmt.has_id ? fmt.report_id : 0,
+                     fmt.buttons.bit_off, fmt.buttons.bits,
+                     fmt.x.bit_off, fmt.y.bit_off,
+                     fmt.wheel.present ? fmt.wheel.bit_off : -1,
+                     fmt.pan.present ? fmt.pan.bit_off : -1);
+        } else {
+            ESP_LOGW(TAG, "mouse descriptor not parsed; using boot report");
+            err = hid_class_request_set_protocol(handle, HID_REPORT_PROTOCOL_BOOT);
+            kind = DEV_MOUSE_BOOT;
         }
     } else {
-        ESP_LOGW(TAG, "device has no boot interface; we only decode boot reports");
+        err = hid_class_request_set_protocol(handle, HID_REPORT_PROTOCOL_BOOT);
+        if (err == ESP_OK) {
+            err = hid_class_request_set_idle(handle, 0, 0);
+        }
+        kind = DEV_KBD;
     }
 
     if (err == ESP_OK) {
         err = hid_host_device_start(handle);
     }
-
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "cannot start %s: %s", proto_name(params.proto), esp_err_to_name(err));
         hid_host_device_close(handle);
+        return;
     }
+
+    hid_iface_t *d = iface_add(handle);
+    if (d == NULL) {
+        ESP_LOGW(TAG, "no free device slot; dropping %s", proto_name(params.proto));
+        hid_host_device_close(handle);
+        return;
+    }
+    d->kind = kind;
+    d->fmt = fmt;
 }
 
 // Runs in the HID host driver's background task — keep it light: just forward

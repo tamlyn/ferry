@@ -15,8 +15,9 @@ void kvm_init(void);
 
 // Handle one USB mouse report: move the active cursor, cross to a neighbouring
 // display if pushed off an edge, and send the resulting absolute position (plus the
-// wheel, which rides along untouched) to the host that owns the current display.
-void kvm_on_mouse(uint8_t buttons, int dx, int dy, int wheel);
+// wheel and horizontal pan, which ride along untouched) to the host that owns the
+// current display.
+void kvm_on_mouse(uint8_t buttons, int dx, int dy, int wheel, int pan);
 
 // Handle one USB keyboard report: route it to the host owning the current display.
 void kvm_on_keyboard(uint8_t modifiers, const uint8_t keys[6]);

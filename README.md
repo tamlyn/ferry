@@ -58,9 +58,11 @@ re-sticks on the new display.
 
 Input flows through these stages:
 
-1. **USB host input** (`usb_input.c`) — enumerates the mouse and keyboard in HID
-   boot protocol and decodes their reports (buttons + relative motion + scroll wheel;
-   modifiers + up to six keycodes).
+1. **USB host input** (`usb_input.c`) — hosts the mouse in HID report protocol,
+   parsing its own report descriptor to decode buttons (including back/forward and
+   extras), relative motion, and vertical + horizontal scroll; the keyboard runs in
+   boot protocol (modifiers + up to six keycodes). A mouse whose descriptor cannot be
+   parsed falls back to the basic boot report.
 2. **Absolute cursor model** (`cursor.c`) — accumulates the mouse's relative motion
    into the virtual cursor's position in the desk's global coordinates, clamped to the
    current display, and flags when the cursor has been pushed *sustainedly* past any
@@ -83,7 +85,7 @@ split across two HID service instances:
 
 | Report | Fields |
 |--------|--------|
-| Mouse (id 1) | 8 buttons; 16-bit **absolute** X and Y (0…32767); 8-bit relative scroll wheel |
+| Mouse (id 1) | 8 buttons (left/right/middle/back/forward/…); 16-bit **absolute** X and Y (0…32767); 8-bit vertical scroll wheel; 8-bit horizontal pan |
 | Keyboard (id 2) | modifier bitmask; up to 6 concurrent keycodes; LED output (Caps/Num Lock) |
 | Relative pointer (id 3, own HID service) | 8-bit **relative** X and Y, no buttons — nudges the cursor across a same-host display seam |
 
@@ -115,9 +117,10 @@ pairing time.
   monitors, plus the second computer at a fixed position with a placeholder
   resolution). It also assumes the Mac connects first. There is no auto-detection or
   user configuration yet; adapting it to another desk means editing `layout.c`.
-- **Vertical scroll only.** The mouse wheel scrolls vertically; horizontal pan is not
-  passed through. The wheel is read opportunistically from the boot report's 4th
-  byte, which most (but not all) mice supply.
+- **Report-protocol mice for the extras.** Back/forward, extra buttons, and
+  horizontal scroll need a mouse whose report descriptor can be parsed; a mouse that
+  only offers an unparseable descriptor falls back to basic boot input (three
+  buttons, motion, vertical wheel).
 - **Two computers.** The connection layer holds exactly two hosts live at once.
 
 ## Building

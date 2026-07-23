@@ -128,7 +128,7 @@ static void nudge_across(int nh, int cd, int nd, int32_t ex, int32_t ey)
     int32_t py = ey < cr.y0 ? cr.y0 : (ey > cr.y1 ? cr.y1 : ey);
     uint16_t ax, ay;
     layout_to_abs(cd, px, py, &ax, &ay);
-    ble_hid_send_mouse(nh, s_buttons, ax, ay, 0);   // pre-position at the seam on cd
+    ble_hid_send_mouse(nh, s_buttons, ax, ay, 0, 0);   // pre-position at the seam on cd
     vTaskDelay(pdMS_TO_TICKS(PREPOS_SETTLE_MS));
 
     int ndx, ndy;
@@ -164,7 +164,7 @@ static void cross_to(int nd)
     cursor_init(&s_cursor, ex, ey);
 }
 
-void kvm_on_mouse(uint8_t buttons, int dx, int dy, int wheel)
+void kvm_on_mouse(uint8_t buttons, int dx, int dy, int wheel, int pan)
 {
     apply_pending_layout();
     int host = pick_ready();
@@ -185,7 +185,7 @@ void kvm_on_mouse(uint8_t buttons, int dx, int dy, int wheel)
 
     uint16_t ax, ay;
     layout_to_abs(s_active_disp, s_cursor.x, s_cursor.y, &ax, &ay);
-    ble_hid_send_mouse(s_active_host, buttons, ax, ay, (int8_t)wheel);
+    ble_hid_send_mouse(s_active_host, buttons, ax, ay, (int8_t)wheel, (int8_t)pan);
     s_buttons = buttons;
 }
 

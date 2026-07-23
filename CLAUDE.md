@@ -85,6 +85,39 @@ The board is a 44-pin **ESP32-S3-WROOM-1 N16R8** dev board
   radio load — try a beefier supply or bulk capacitance on the 5 V rail before
   suspecting firmware.
 
+## USB HID input
+
+The mouse runs in **report protocol** (not boot): `usb_input.c` fetches its report
+descriptor and a small parser (`mouse_fmt_parse`) locates the button, X/Y, wheel and
+AC-Pan fields, so back/forward/extra buttons and horizontal scroll come through —
+none of which the 3-button boot report carries. A mouse whose descriptor we can't
+parse (no byte-aligned X/Y) falls back to the boot report. The **keyboard stays on
+boot protocol** — all we need. Gotchas, mostly hit with a Logitech Bolt receiver
+hosting an MX Master 3S:
+
+- **Only boot mouse/keyboard interfaces are claimed.** The Bolt receiver enumerates
+  **three** interfaces (boot keyboard, boot mouse, a vendor HID++ one); a directly
+  attached keyboard adds more. Claiming the vendor/extra interfaces exhausts the
+  S3's handful of USB host channels — `No more HCD channels available`, and then the
+  *already-open* interfaces stop polling (silent). So we skip any interface that
+  isn't `HID_PROTOCOL_MOUSE`/`_KEYBOARD`, exactly as the channel budget requires.
+
+- **A multi-device (Easy-Switch) mouse only reports on the channel it's switched to.**
+  If the MX Master is on its Bluetooth-to-a-computer channel, the Bolt receiver's
+  mouse interface is **dead silent** — enumerates fine, delivers zero reports, looks
+  like a firmware bug but isn't. For any capture/test, first tap the mouse's
+  Easy-Switch to the channel paired with the dongle in the board (LED goes solid).
+
+- **MX Master 3S map (report id 2, 9 bytes on the wire):** buttons byte — bit0 L,
+  bit1 R, bit2 middle, bit3 **back**, bit4 **forward**, bit5 **gesture paddle**
+  (button 6); then 16-bit rel X, 16-bit rel Y, 8-bit wheel, 8-bit AC Pan. The gesture
+  paddle *is* forwarded (button 6) but macOS has no default action for it.
+
+- **Adding AC Pan grew the mouse report 6→7 bytes**, which is a report-map change:
+  extra *buttons* work without re-pairing (byte 0 is unchanged, the map already
+  declared 8), but **horizontal scroll needs the host descriptor-cache flush** —
+  forget device + toggle Bluetooth off/on + re-pair, per BLE gotcha #9.
+
 ## BLE stack
 
 Host stack is **NimBLE**, not Bluedroid. NimBLE tracks CCCD (notification-enabled)
@@ -97,10 +130,11 @@ in `ble_hid.c` is ours regardless.
 
 The HID report maps in `our_descriptor.c` are the **external contract** the hosts
 pair against, split across **two HID service instances**: instance one is the mouse
-(report id 1: buttons + absolute X/Y + a relative scroll wheel) + keyboard (id 2);
-instance two is a motion-only relative pointer (id 3, relative X/Y, used to nudge
-the cursor across a same-host display seam — see `kvm.c` / `layout.c`). Two macOS
-behaviours force that shape, both established by A/B testing on this device:
+(report id 1: 8 buttons + absolute X/Y + a relative scroll wheel + a horizontal AC
+Pan byte) + keyboard (id 2); instance two is a motion-only relative pointer (id 3,
+relative X/Y, used to nudge the cursor across a same-host display seam — see `kvm.c`
+/ `layout.c`). Two macOS behaviours force that shape, both established by A/B testing
+on this device:
 
 - **The relative pointer must live in a separate HID service.** If an absolute and
   a relative pointer share one HID device, macOS moves the cursor and clicks but
@@ -219,10 +253,10 @@ problem are observable locally:
 | File | Role |
 |------|------|
 | `ferry.c` | app entry; wires USB input → KVM, starts the layout selector |
-| `usb_input.c` | USB host + HID boot-protocol decode (mouse + keyboard via hub; wheel read from the boot report's 4th byte) |
+| `usb_input.c` | USB host + HID decode: mouse in *report* protocol (a small descriptor parser locates the button/X/Y/wheel/AC-pan fields — extra buttons + horizontal scroll), keyboard in boot protocol; unparseable mice fall back to the boot report. See "USB HID input". |
 | `cursor.c` | the single active cursor in global desk points; speed-based pointer acceleration (slow = precise, fast = 1:1); sustained any-edge push detection |
 | `layout.c` | the desk model: display rectangles in one global coordinate space, each owned by a host; edge adjacency + the abs/relative crossing geometry. Two selectable layouts — A (external on Mac) and B (external on PC) — sharing geometry and differing only in host ownership |
 | `kvm.c` | routes input through the desk; on an edge push crosses the cursor to the neighbouring display — relative nudge within a host (slot 0 = Mac), host switch between computers (slot 1 = PC). `kvm_request_layout` swaps layouts safely (applied on the input task, re-homing the cursor) |
 | `control.c` | physical layout selector: BOOT button (GPIO0) cycles A/B, on-board WS2812 RGB LED (GPIO48) flashes the active layout's colour (A = blue, B = green), choice persisted in NVS |
 | `ble_hid.c` | NimBLE HOGP peripheral: advertising, bonding, 2-slot connection layer (each host pinned to a slot by BLE identity), per-host report senders (abs mouse, keyboard, relative pointer) |
-| `our_descriptor.c` | HID report maps, two HID service instances (mouse id 1 + wheel & keyboard id 2; relative pointer id 3 separate) — the external contract |
+| `our_descriptor.c` | HID report maps, two HID service instances (mouse id 1 — buttons + abs X/Y + wheel + AC pan — & keyboard id 2; relative pointer id 3 separate) — the external contract |

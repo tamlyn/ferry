@@ -25,11 +25,11 @@ esp_err_t ble_hid_init(void);
 bool ble_hid_ready(int host);
 
 // Send an absolute-pointer report to host `host`. buttons is a bitmask (bit0 =
-// left, bit1 = right, bit2 = middle...); x/y are absolute coordinates in
-// 0..ABS_AXIS_MAX; wheel is a signed relative scroll delta. NimBLE only puts the
-// notification on the wire if that host subscribed, so input never leaks to the
-// wrong machine.
-esp_err_t ble_hid_send_mouse(int host, uint8_t buttons, uint16_t x, uint16_t y, int8_t wheel);
+// left, bit1 = right, bit2 = middle, bit3 = back, bit4 = forward...); x/y are
+// absolute coordinates in 0..ABS_AXIS_MAX; wheel is a signed vertical scroll
+// delta and pan a signed horizontal one. NimBLE only puts the notification on the
+// wire if that host subscribed, so input never leaks to the wrong machine.
+esp_err_t ble_hid_send_mouse(int host, uint8_t buttons, uint16_t x, uint16_t y, int8_t wheel, int8_t pan);
 
 // Send a *relative* pointer report (report id 3) to host `host` — a signed dx/dy
 // delta, the only motion that crosses a display boundary that absolute positioning
