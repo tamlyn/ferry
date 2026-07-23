@@ -13,6 +13,7 @@
 
 #include "ble_hid.h"
 #include "control.h"
+#include "diag.h"
 #include "kvm.h"
 #include "usb_input.h"
 
@@ -35,6 +36,7 @@ static void on_keyboard(uint8_t modifiers, const uint8_t keys[6])
 void app_main(void)
 {
     ESP_LOGI(TAG, "Ferry (ESP32-S3) — M3: USB → absolute cursor → BLE HID KVM");
+    diag_log_reset_reason();   // why did we (re)boot? a fault here is the freeze's trail
 
     // NVS holds the BLE bonding keys, so paired hosts reconnect without re-pairing.
     esp_err_t ret = nvs_flash_init();
@@ -48,6 +50,7 @@ void app_main(void)
     ESP_ERROR_CHECK(control_init());   // BOOT-button layout selector + RGB status LED
     ESP_ERROR_CHECK(ble_hid_init());
     ESP_ERROR_CHECK(usb_input_start(on_mouse, on_keyboard));
+    diag_start();   // reboot-on-wedge watchdog + heap/mbuf watermark logging
 
     ESP_LOGI(TAG, "ready — pair up to two hosts, then drive the USB mouse and keyboard");
 }

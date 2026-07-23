@@ -43,4 +43,16 @@ esp_err_t ble_hid_send_mouse_rel(int host, int8_t dx, int8_t dy);
 // concurrent keycodes (0 = unused slot).
 esp_err_t ble_hid_send_keyboard(int host, uint8_t modifiers, const uint8_t keys[6]);
 
+// ---- diagnostics ----------------------------------------------------------
+
+// How long a BLE notification has been in flight, in milliseconds, or 0 if none
+// is (an idle link). A healthy notify returns in microseconds, so a value in the
+// seconds means the send path has wedged — the freeze the watchdogs miss. diag.c
+// polls this to reboot a stuck device instead of leaving it dead until reset.
+uint32_t ble_hid_send_stuck_ms(void);
+
+// Count of mbuf-pool allocation failures across all senders since boot — a proxy
+// for BLE TX-buffer exhaustion or an mbuf leak.
+uint32_t ble_hid_mbuf_fail_count(void);
+
 #endif

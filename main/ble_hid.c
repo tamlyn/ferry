@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
@@ -529,6 +530,27 @@ esp_err_t ble_hid_init(void)
 
 // ---- per-host transport ---------------------------------------------------
 
+// Non-zero iff a notification is in flight: the microsecond timestamp it began,
+// set immediately around ble_gatts_notify_custom and cleared after. A healthy
+// notify completes in microseconds; a value that stays set for seconds means the
+// send path has wedged — the silent hang none of the watchdogs catch, since a
+// blocked task doesn't starve the idle task the task-WDT actually monitors. All
+// sends run serially on the one HID-callback task, so a plain volatile suffices;
+// diag.c polls this to reboot a genuinely stuck device.
+static volatile int64_t s_notify_start_us;
+
+// Times ble_hs_mbuf_from_flat() returned NULL — mbuf-pool exhaustion, which swells
+// first if the BLE TX path can't keep up or something leaks mbufs.
+static volatile uint32_t s_mbuf_fail;
+
+static int notify_watched(uint16_t conn_handle, uint16_t val_handle, struct os_mbuf *om)
+{
+    s_notify_start_us = esp_timer_get_time();
+    int rc = ble_gatts_notify_custom(conn_handle, val_handle, om);
+    s_notify_start_us = 0;
+    return rc;
+}
+
 bool ble_hid_ready(int host)
 {
     if (host < 0 || host >= BLE_HID_MAX_HOSTS) {
@@ -556,10 +578,11 @@ esp_err_t ble_hid_send_mouse(int host, uint8_t buttons, uint16_t x, uint16_t y, 
     };
     struct os_mbuf *om = ble_hs_mbuf_from_flat(report, sizeof(report));
     if (om == NULL) {
+        s_mbuf_fail++;
         return ESP_ERR_NO_MEM;
     }
     // NimBLE frees om, and only puts it on the wire for this conn if it subscribed.
-    int rc = ble_gatts_notify_custom(s->conn_handle, s_mouse_val_handle, om);
+    int rc = notify_watched(s->conn_handle, s_mouse_val_handle, om);
     if (rc != 0) {
         // Dropped reports are invisible to the user beyond a stutter (the
         // position is absolute, so the next report corrects it) — count them
@@ -587,9 +610,10 @@ esp_err_t ble_hid_send_mouse_rel(int host, int8_t dx, int8_t dy)
     uint8_t report[MOUSE_REL_REPORT_SIZE] = { (uint8_t)dx, (uint8_t)dy };
     struct os_mbuf *om = ble_hs_mbuf_from_flat(report, sizeof(report));
     if (om == NULL) {
+        s_mbuf_fail++;
         return ESP_ERR_NO_MEM;
     }
-    int rc = ble_gatts_notify_custom(s->conn_handle, s_mouse_rel_val_handle, om);
+    int rc = notify_watched(s->conn_handle, s_mouse_rel_val_handle, om);
     return rc == 0 ? ESP_OK : ESP_FAIL;
 }
 
@@ -608,8 +632,26 @@ esp_err_t ble_hid_send_keyboard(int host, uint8_t modifiers, const uint8_t keys[
     memcpy(&report[2], keys, 6);
     struct os_mbuf *om = ble_hs_mbuf_from_flat(report, sizeof(report));
     if (om == NULL) {
+        s_mbuf_fail++;
         return ESP_ERR_NO_MEM;
     }
-    int rc = ble_gatts_notify_custom(s->conn_handle, s_kbd_val_handle, om);
+    int rc = notify_watched(s->conn_handle, s_kbd_val_handle, om);
     return rc == 0 ? ESP_OK : ESP_FAIL;
+}
+
+// ---- diagnostics hooks ----------------------------------------------------
+
+uint32_t ble_hid_send_stuck_ms(void)
+{
+    int64_t started = s_notify_start_us;
+    if (started == 0) {
+        return 0;   // nothing in flight — an idle link, not a wedged one
+    }
+    int64_t dt_us = esp_timer_get_time() - started;
+    return dt_us > 0 ? (uint32_t)(dt_us / 1000) : 0;
+}
+
+uint32_t ble_hid_mbuf_fail_count(void)
+{
+    return s_mbuf_fail;
 }
