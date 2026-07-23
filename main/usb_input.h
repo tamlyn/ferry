@@ -19,4 +19,10 @@ typedef void (*usb_keyboard_report_cb)(uint8_t modifiers, const uint8_t keys[6])
 // reports are delivered to the callbacks. Either callback may be NULL.
 esp_err_t usb_input_start(usb_mouse_report_cb on_mouse, usb_keyboard_report_cb on_keyboard);
 
+// Diagnostics: cumulative counts of HID reports received from the USB host driver
+// (per device) and transfer errors, since boot. Any out-param may be NULL. Used by
+// diag.c to tell a wedged USB input path (counts flat during a freeze) from a
+// downstream BLE stall (counts still climbing).
+void usb_input_stats(uint32_t *mouse_reports, uint32_t *kbd_reports, uint32_t *xfer_errors);
+
 #endif

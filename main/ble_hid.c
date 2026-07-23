@@ -543,6 +543,12 @@ static volatile int64_t s_notify_start_us;
 // first if the BLE TX path can't keep up or something leaks mbufs.
 static volatile uint32_t s_mbuf_fail;
 
+// Per-host absolute-mouse send attempts and rc==0 successes. diag.c logs their
+// deltas: attempts climbing while the cursor is frozen means input is reaching the
+// send path and the stall is on the wire (delivery), not upstream in USB.
+static volatile uint32_t s_tx_attempt[BLE_HID_MAX_HOSTS];
+static volatile uint32_t s_tx_ok[BLE_HID_MAX_HOSTS];
+
 static int notify_watched(uint16_t conn_handle, uint16_t val_handle, struct os_mbuf *om)
 {
     s_notify_start_us = esp_timer_get_time();
@@ -582,6 +588,7 @@ esp_err_t ble_hid_send_mouse(int host, uint8_t buttons, uint16_t x, uint16_t y, 
         return ESP_ERR_NO_MEM;
     }
     // NimBLE frees om, and only puts it on the wire for this conn if it subscribed.
+    s_tx_attempt[host]++;
     int rc = notify_watched(s->conn_handle, s_mouse_val_handle, om);
     if (rc != 0) {
         // Dropped reports are invisible to the user beyond a stutter (the
@@ -594,6 +601,7 @@ esp_err_t ble_hid_send_mouse(int host, uint8_t buttons, uint16_t x, uint16_t y, 
         }
         return ESP_FAIL;
     }
+    s_tx_ok[host]++;
     return ESP_OK;
 }
 
@@ -654,4 +662,15 @@ uint32_t ble_hid_send_stuck_ms(void)
 uint32_t ble_hid_mbuf_fail_count(void)
 {
     return s_mbuf_fail;
+}
+
+void ble_hid_tx_counts(int host, uint32_t *attempt, uint32_t *ok)
+{
+    if (host < 0 || host >= BLE_HID_MAX_HOSTS) {
+        if (attempt) *attempt = 0;
+        if (ok)      *ok      = 0;
+        return;
+    }
+    if (attempt) *attempt = s_tx_attempt[host];
+    if (ok)      *ok      = s_tx_ok[host];
 }

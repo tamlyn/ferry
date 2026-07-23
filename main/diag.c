@@ -3,11 +3,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
 
 #include "ble_hid.h"
+#include "usb_input.h"
 
 static const char *TAG = "diag";
 
@@ -18,7 +18,7 @@ static const char *TAG = "diag";
 #define SEND_STUCK_REBOOT_MS   3000
 
 #define TICK_MS                1000
-#define HEAP_LOG_EVERY_TICKS   60     // ~60 s between resource-watermark lines
+#define HEARTBEAT_EVERY_TICKS  15     // ~15 s between activity/resource lines
 
 static const char *reset_reason_str(esp_reset_reason_t r)
 {
@@ -53,12 +53,21 @@ void diag_log_reset_reason(void)
     }
 }
 
-static void log_watermarks(void)
+// One line that answers "where is a freeze stuck?" at a glance. Deltas since the
+// previous line: usb mouse/kbd = reports the USB host handed us (flat during a
+// freeze => USB input wedged); tx0/tx1 = per-host mouse sends attempt/ok (climbing
+// while the cursor is frozen => the stall is on the wire, not upstream). Absolute
+// heap + mbuf failures ride along to catch a slow leak.
+static void log_heartbeat(uint32_t d_mouse, uint32_t d_kbd, uint32_t d_err,
+                          uint32_t d_a0, uint32_t d_o0, uint32_t d_a1, uint32_t d_o1)
 {
-    ESP_LOGI(TAG, "heap: free=%u min-free=%u largest-block=%u | mbuf-fails=%u",
+    ESP_LOGI(TAG,
+             "usb: mouse+%u kbd+%u err+%u | tx0 +%u/+%u tx1 +%u/+%u | "
+             "heap free=%u min=%u | mbuf-fails=%u",
+             (unsigned)d_mouse, (unsigned)d_kbd, (unsigned)d_err,
+             (unsigned)d_a0, (unsigned)d_o0, (unsigned)d_a1, (unsigned)d_o1,
              (unsigned)esp_get_free_heap_size(),
              (unsigned)esp_get_minimum_free_heap_size(),
-             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT),
              (unsigned)ble_hid_mbuf_fail_count());
 }
 
@@ -69,7 +78,12 @@ static void log_watermarks(void)
 static void diag_task(void *arg)
 {
     (void)arg;
-    log_watermarks();   // a baseline line right after boot
+    uint32_t p_mouse = 0, p_kbd = 0, p_err = 0;
+    uint32_t p_a0 = 0, p_o0 = 0, p_a1 = 0, p_o1 = 0;
+    usb_input_stats(&p_mouse, &p_kbd, &p_err);
+    ble_hid_tx_counts(0, &p_a0, &p_o0);
+    ble_hid_tx_counts(1, &p_a1, &p_o1);
+
     unsigned tick = 0;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(TICK_MS));
@@ -82,10 +96,19 @@ static void diag_task(void *arg)
             esp_restart();
         }
 
-        if (++tick >= HEAP_LOG_EVERY_TICKS) {
-            tick = 0;
-            log_watermarks();
+        if (++tick < HEARTBEAT_EVERY_TICKS) {
+            continue;
         }
+        tick = 0;
+
+        uint32_t mouse, kbd, err, a0, o0, a1, o1;
+        usb_input_stats(&mouse, &kbd, &err);
+        ble_hid_tx_counts(0, &a0, &o0);
+        ble_hid_tx_counts(1, &a1, &o1);
+        log_heartbeat(mouse - p_mouse, kbd - p_kbd, err - p_err,
+                      a0 - p_a0, o0 - p_o0, a1 - p_a1, o1 - p_o1);
+        p_mouse = mouse; p_kbd = kbd; p_err = err;
+        p_a0 = a0; p_o0 = o0; p_a1 = a1; p_o1 = o1;
     }
 }
 

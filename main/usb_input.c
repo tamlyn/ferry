@@ -31,6 +31,15 @@ static const char *TAG = "usb_input";
 static usb_mouse_report_cb    s_on_mouse    = NULL;
 static usb_keyboard_report_cb s_on_keyboard = NULL;
 
+// Counters for the freeze hunt: how many raw HID reports the USB host driver has
+// handed us, split by device, plus transfer errors. diag.c logs their deltas, so a
+// freeze where these stay flat while the user is actively typing/moving = the USB
+// input path has wedged (the reports simply stop arriving); deltas still rising
+// means input reaches us and the stall is downstream (BLE).
+static volatile uint32_t s_mouse_reports;
+static volatile uint32_t s_kbd_reports;
+static volatile uint32_t s_xfer_errors;
+
 // The HID host driver reports device connections from its own background task.
 // We hand those off to our event task via a queue so that opening/starting a
 // device (which issues USB control transfers) happens outside the driver's
@@ -105,8 +114,10 @@ static void hid_host_interface_callback(hid_host_device_handle_t handle,
             handle, data, sizeof(data), &len));
 
         if (params.proto == HID_PROTOCOL_MOUSE) {
+            s_mouse_reports++;
             dispatch_mouse_report(data, len);
         } else if (params.proto == HID_PROTOCOL_KEYBOARD) {
+            s_kbd_reports++;
             dispatch_keyboard_report(data, len);
         }
         break;
@@ -116,6 +127,7 @@ static void hid_host_interface_callback(hid_host_device_handle_t handle,
         ESP_ERROR_CHECK(hid_host_device_close(handle));
         break;
     case HID_HOST_INTERFACE_EVENT_TRANSFER_ERROR:
+        s_xfer_errors++;
         ESP_LOGW(TAG, "%s transfer error", proto_name(params.proto));
         break;
     default:
@@ -254,4 +266,11 @@ esp_err_t usb_input_start(usb_mouse_report_cb on_mouse, usb_keyboard_report_cb o
     }
 
     return ESP_OK;
+}
+
+void usb_input_stats(uint32_t *mouse_reports, uint32_t *kbd_reports, uint32_t *xfer_errors)
+{
+    if (mouse_reports) *mouse_reports = s_mouse_reports;
+    if (kbd_reports)   *kbd_reports   = s_kbd_reports;
+    if (xfer_errors)   *xfer_errors   = s_xfer_errors;
 }

@@ -55,4 +55,9 @@ uint32_t ble_hid_send_stuck_ms(void);
 // for BLE TX-buffer exhaustion or an mbuf leak.
 uint32_t ble_hid_mbuf_fail_count(void);
 
+// Cumulative absolute-mouse send attempts and rc==0 successes for `host` since
+// boot (0 for an out-of-range host). Any out-param may be NULL. diag.c logs the
+// deltas to distinguish a wedged input path from a delivery-side stall.
+void ble_hid_tx_counts(int host, uint32_t *attempt, uint32_t *ok);
+
 #endif
