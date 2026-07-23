@@ -28,10 +28,27 @@ typedef struct {
     int32_t x0, y0, x1, y1;
 } rect_t;
 
+// The desk layouts, selected at runtime (see control.c). They share the same display
+// geometry and differ only in which host drives the external monitor. Keep LAYOUT_A/B
+// in step with the ownership vectors and flash colours in layout.c / control.c.
+typedef enum {
+    LAYOUT_A,      // external monitor plugged into the Mac
+    LAYOUT_B,      // external monitor plugged into the PC
+    LAYOUT_COUNT,
+} layout_id_t;
+
 int    layout_display_count(void);
 int    layout_host_of(int disp);        // BLE host slot a display belongs to
 rect_t layout_rect(int disp);
 int    layout_home_display(int host);   // default display when a host is first driven
+
+// Runtime layout selection. layout_set_active is called only from the KVM (input
+// task); the accessors above read the active layout. Use kvm_request_layout to switch
+// safely from another task.
+int         layout_count(void);         // number of layouts
+int         layout_active(void);        // active layout id
+void        layout_set_active(int id);  // select a layout (out-of-range -> LAYOUT_A)
+const char *layout_name(int id);        // short human name, for logs
 
 // The neighbouring display across `edge` of `disp` at global point (gx, gy), or -1
 // if that side is a wall there — displays only border where their rectangles

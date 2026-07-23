@@ -8,42 +8,58 @@
 #define HOST_MAC 0
 #define HOST_PC  1
 
-// ---- Config A: external monitor plugged into the Mac -----------------------
+// ---- The desk: three displays, two layouts --------------------------------
 //
-// The Mac's two displays are its real arrangement, measured on the dev Mac via
+// The three display rectangles are the same physical arrangement in both layouts;
+// only which host drives each one changes. Measured on the dev Mac via
 // CGDisplayBounds (points; y increases downward):
+//   external : origin (-2560, -716) 2560x1440 — upper-left, its right edge meeting
+//              the built-in's left edge over y 0..724 only.
 //   built-in : origin (0, 0)       1512x982
-//   external : origin (-2560, -716) 2560x1440   — upper-left, its right edge
-//              meeting the Mac's left edge over y 0..724 only.
-//
 // The PC is a separate machine, so its position is our model, not an OS fact: its
 // top-right corner sits at the external's bottom-right corner (0, 724), extending
-// left and down. This realises the crossings:
-//   Mac left edge, y 0..724   <-> external (same host)
-//   Mac left edge, y 724..982 <-> PC        (host switch)
-//   external bottom           <-> PC        (host switch)
-//   PC top                    <-> external  (host switch)
-// The PC resolution is a PLACEHOLDER (1920x1080) until the real panel is known.
-enum { DISP_EXTERNAL, DISP_BUILTIN, DISP_PC };
+// left and down. Its resolution is a PLACEHOLDER (1920x1080) until the real panel is
+// known.
+enum { DISP_EXTERNAL, DISP_BUILTIN, DISP_PC, N_DISP };
 
-static const struct {
-    int    host;
-    rect_t r;
-} s_disp[] = {
-    [DISP_EXTERNAL] = { HOST_MAC, { -2560, -716,    0,  724 } },
-    [DISP_BUILTIN]  = { HOST_MAC, {     0,    0, 1512,  982 } },
-    [DISP_PC]       = { HOST_PC,  { -1920,  724,    0, 1804 } },
+static const rect_t s_rect[N_DISP] = {
+    [DISP_EXTERNAL] = { -2560, -716,    0,  724 },
+    [DISP_BUILTIN]  = {     0,    0, 1512,  982 },
+    [DISP_PC]       = { -1920,  724,    0, 1804 },
 };
-#define N_DISP ((int)(sizeof(s_disp) / sizeof(s_disp[0])))
+
+// A layout is just which host owns each display. Config A: the external is plugged
+// into the Mac. Config B: it's re-plugged into the PC — same physical spot, but now
+// addressed via the PC. Because kvm.c decides same-host-nudge vs. host-switch from
+// ownership at runtime and the rectangles never move, the adjacency table below is
+// identical for both layouts; flipping the external's owner is the whole difference.
+//   A: built-in left edge (y 0..724) <-> external is a same-host nudge; the external
+//      bottom / PC top is a Mac<->PC switch.
+//   B: those flip — external <-> built-in becomes a Mac<->PC switch, external <-> PC
+//      becomes a same-host PC nudge.
+static const int s_host[LAYOUT_COUNT][N_DISP] = {
+    [LAYOUT_A] = { [DISP_EXTERNAL] = HOST_MAC, [DISP_BUILTIN] = HOST_MAC, [DISP_PC] = HOST_PC },
+    [LAYOUT_B] = { [DISP_EXTERNAL] = HOST_PC,  [DISP_BUILTIN] = HOST_MAC, [DISP_PC] = HOST_PC },
+};
+static const char *const s_name[LAYOUT_COUNT] = {
+    [LAYOUT_A] = "A (external on Mac)",
+    [LAYOUT_B] = "B (external on PC)",
+};
+static int s_active = LAYOUT_A;
 
 int    layout_display_count(void) { return N_DISP; }
-int    layout_host_of(int disp)   { return s_disp[disp].host; }
-rect_t layout_rect(int disp)      { return s_disp[disp].r; }
+int    layout_host_of(int disp)   { return s_host[s_active][disp]; }
+rect_t layout_rect(int disp)      { return s_rect[disp]; }
+
+int         layout_count(void)        { return LAYOUT_COUNT; }
+int         layout_active(void)       { return s_active; }
+const char *layout_name(int id)       { return (id >= 0 && id < LAYOUT_COUNT) ? s_name[id] : "?"; }
+void        layout_set_active(int id) { s_active = (id >= 0 && id < LAYOUT_COUNT) ? id : LAYOUT_A; }
 
 int layout_home_display(int host)
 {
     for (int i = 0; i < N_DISP; i++) {
-        if (s_disp[i].host == host) {
+        if (s_host[s_active][i] == host) {
             return i;
         }
     }
@@ -99,7 +115,7 @@ int layout_neighbor(int disp, edge_t edge, int32_t gx, int32_t gy)
 
 void layout_to_abs(int disp, int32_t gx, int32_t gy, uint16_t *ax, uint16_t *ay)
 {
-    rect_t r = s_disp[disp].r;
+    rect_t r = s_rect[disp];
     int32_t x = (int32_t)((int64_t)(gx - r.x0) * ABS_AXIS_MAX / (r.x1 - r.x0));
     int32_t y = (int32_t)((int64_t)(gy - r.y0) * ABS_AXIS_MAX / (r.y1 - r.y0));
     *ax = (uint16_t)(x < 0 ? 0 : (x > ABS_AXIS_MAX ? ABS_AXIS_MAX : x));
@@ -108,7 +124,7 @@ void layout_to_abs(int disp, int32_t gx, int32_t gy, uint16_t *ax, uint16_t *ay)
 
 void layout_nudge_dir(int from, int to, int *ax, int *ay)
 {
-    rect_t a = s_disp[from].r, b = s_disp[to].r;
+    rect_t a = s_rect[from], b = s_rect[to];
     int32_t ddx = (b.x0 + b.x1) / 2 - (a.x0 + a.x1) / 2;
     int32_t ddy = (b.y0 + b.y1) / 2 - (a.y0 + a.y1) / 2;
     int32_t mx = ddx < 0 ? -ddx : ddx;

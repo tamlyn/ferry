@@ -3,3 +3,5 @@ dependencies:
   idf: ">=5.1"
   # USB Host HID class driver (boot + report protocol, mouse + keyboard).
   espressif/usb_host_hid: "^1.0.4"
+  # On-board WS2812 RGB LED — the layout-status indicator (control.c).
+  espressif/led_strip: "^2.5.5"

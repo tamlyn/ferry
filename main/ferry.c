@@ -12,6 +12,7 @@
 #include "nvs_flash.h"
 
 #include "ble_hid.h"
+#include "control.h"
 #include "kvm.h"
 #include "usb_input.h"
 
@@ -44,6 +45,7 @@ void app_main(void)
     ESP_ERROR_CHECK(ret);
 
     kvm_init();
+    ESP_ERROR_CHECK(control_init());   // BOOT-button layout selector + RGB status LED
     ESP_ERROR_CHECK(ble_hid_init());
     ESP_ERROR_CHECK(usb_input_start(on_mouse, on_keyboard));
 

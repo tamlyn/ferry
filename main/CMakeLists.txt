@@ -1,5 +1,6 @@
 idf_component_register(SRCS "ferry.c"
                             "ble_hid.c"
+                            "control.c"
                             "cursor.c"
                             "kvm.c"
                             "layout.c"

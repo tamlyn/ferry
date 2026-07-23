@@ -38,6 +38,10 @@ static int s_active_disp = -1;
 static int s_os_disp[BLE_HID_MAX_HOSTS];
 static uint8_t s_buttons;
 
+// A layout switch requested from another task (e.g. control.c's button). Applied on
+// the input task at the next report — see apply_pending_layout. -1 = nothing pending.
+static volatile int s_pending_layout = -1;
+
 void kvm_init(void)
 {
     for (int i = 0; i < BLE_HID_MAX_HOSTS; i++) {
@@ -46,6 +50,32 @@ void kvm_init(void)
     s_active_host = -1;
     s_active_disp = -1;
     s_buttons = 0;
+}
+
+void kvm_request_layout(int layout_id)
+{
+    // Just record the request; the input task applies it (apply_pending_layout) so the
+    // switch and cursor re-home never race a report in flight. Presses are human-paced,
+    // so a request landing in the brief window before the input task consumes the last
+    // one is corrected by the next press.
+    s_pending_layout = layout_id;
+}
+
+// Apply a pending layout switch on the input task. Re-homing via kvm_init drops the
+// per-host display memory, which is meaningful only within one layout; the cursor
+// re-homes (to the first ready host) on this same report.
+static void apply_pending_layout(void)
+{
+    int id = s_pending_layout;
+    if (id < 0) {
+        return;
+    }
+    s_pending_layout = -1;
+    if (id != layout_active()) {
+        layout_set_active(id);
+        kvm_init();
+        ESP_LOGI(TAG, "layout -> %s", layout_name(id));
+    }
 }
 
 // A host that is connected and subscribed, preferring the current active one.
@@ -136,6 +166,7 @@ static void cross_to(int nd)
 
 void kvm_on_mouse(uint8_t buttons, int dx, int dy, int wheel)
 {
+    apply_pending_layout();
     int host = pick_ready();
     if (host < 0) {
         return;   // no ready host to drive
@@ -160,6 +191,7 @@ void kvm_on_mouse(uint8_t buttons, int dx, int dy, int wheel)
 
 void kvm_on_keyboard(uint8_t modifiers, const uint8_t keys[6])
 {
+    apply_pending_layout();
     int host = pick_ready();
     if (host < 0) {
         return;

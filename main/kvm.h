@@ -21,4 +21,9 @@ void kvm_on_mouse(uint8_t buttons, int dx, int dy, int wheel);
 // Handle one USB keyboard report: route it to the host owning the current display.
 void kvm_on_keyboard(uint8_t modifiers, const uint8_t keys[6]);
 
+// Request a switch to layout `layout_id` (see layout.h). Safe to call from any task:
+// the switch is applied on the input task just before the next report, re-homing the
+// cursor so no stale per-host display state carries over. A no-op if already active.
+void kvm_request_layout(int layout_id);
+
 #endif

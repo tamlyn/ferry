@@ -41,6 +41,13 @@ of pulsing. Don't capture with `stty -f <port> …` + `cat`: macOS resets the te
 settings between the two opens, so the capture records garbage at the wrong baud.
 Keep the port held open by one process (pyserial) for the whole session.
 
+**Hold DTR deasserted while reading** (`p.dtr = False`). The BOOT button (GPIO0) is
+the layout selector (see below), and GPIO0 is tied into the serial auto-reset circuit
+— asserting DTR, which pyserial does by default on open, pulls GPIO0 low and registers
+as a phantom layout-switch press (seen: the device jumped Config A → B the moment a
+monitor connected). Standalone operation is unaffected; only a serial host toggling
+those lines does it.
+
 ## Clearing bonds (and the mandatory host-side step)
 
 `idf.py -p <port> erase-flash` wipes the whole chip including the NVS partition (all
@@ -211,10 +218,11 @@ problem are observable locally:
 
 | File | Role |
 |------|------|
-| `ferry.c` | app entry; wires USB input → KVM |
+| `ferry.c` | app entry; wires USB input → KVM, starts the layout selector |
 | `usb_input.c` | USB host + HID boot-protocol decode (mouse + keyboard via hub; wheel read from the boot report's 4th byte) |
 | `cursor.c` | the single active cursor in global desk points; speed-based pointer acceleration (slow = precise, fast = 1:1); sustained any-edge push detection |
-| `layout.c` | the desk model: display rectangles in one global coordinate space, each owned by a host; edge adjacency + the abs/relative crossing geometry. Currently hard-coded to "Config A" |
-| `kvm.c` | routes input through the desk; on an edge push crosses the cursor to the neighbouring display — relative nudge within a host (slot 0 = Mac), host switch between computers (slot 1 = PC) |
+| `layout.c` | the desk model: display rectangles in one global coordinate space, each owned by a host; edge adjacency + the abs/relative crossing geometry. Two selectable layouts — A (external on Mac) and B (external on PC) — sharing geometry and differing only in host ownership |
+| `kvm.c` | routes input through the desk; on an edge push crosses the cursor to the neighbouring display — relative nudge within a host (slot 0 = Mac), host switch between computers (slot 1 = PC). `kvm_request_layout` swaps layouts safely (applied on the input task, re-homing the cursor) |
+| `control.c` | physical layout selector: BOOT button (GPIO0) cycles A/B, on-board WS2812 RGB LED (GPIO48) flashes the active layout's colour (A = blue, B = green), choice persisted in NVS |
 | `ble_hid.c` | NimBLE HOGP peripheral: advertising, bonding, 2-slot connection layer (each host pinned to a slot by BLE identity), per-host report senders (abs mouse, keyboard, relative pointer) |
 | `our_descriptor.c` | HID report maps, two HID service instances (mouse id 1 + wheel & keyboard id 2; relative pointer id 3 separate) — the external contract |
