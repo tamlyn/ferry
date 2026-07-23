@@ -19,6 +19,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 
 #include "esp_err.h"
 #include "esp_intr_alloc.h"
@@ -53,6 +54,16 @@ typedef struct {
 } app_event_t;
 
 static QueueHandle_t app_event_queue = NULL;
+
+// The open interface handles of the mouse and keyboard, stashed so the USB
+// watchdog (diag.c) can issue a liveness probe when reports go silent. NULL when
+// no such device is open. Guarded by s_probe_lock: the probe holds the lock
+// across its (≤~5 s) control request, and the disconnect handler takes it before
+// clearing+closing a handle — so a disconnect landing mid-probe waits rather than
+// closing a handle out from under an in-flight transfer.
+static hid_host_device_handle_t s_mouse_handle = NULL;
+static hid_host_device_handle_t s_kbd_handle   = NULL;
+static SemaphoreHandle_t        s_probe_lock    = NULL;
 
 static const char *proto_name(uint8_t proto)
 {
@@ -366,7 +377,13 @@ static void hid_host_interface_callback(hid_host_device_handle_t handle,
     case HID_HOST_INTERFACE_EVENT_DISCONNECTED:
         ESP_LOGI(TAG, "%s disconnected", proto_name(params.proto));
         iface_remove(handle);
+        // Drop the stashed probe handle before closing so a concurrent probe can't
+        // touch a closed handle. Taking the lock waits out any in-flight probe.
+        xSemaphoreTake(s_probe_lock, portMAX_DELAY);
+        if (handle == s_mouse_handle) s_mouse_handle = NULL;
+        if (handle == s_kbd_handle)   s_kbd_handle = NULL;
         ESP_ERROR_CHECK(hid_host_device_close(handle));
+        xSemaphoreGive(s_probe_lock);
         break;
     case HID_HOST_INTERFACE_EVENT_TRANSFER_ERROR:
         s_xfer_errors++;
@@ -456,6 +473,15 @@ static void handle_device_connected(hid_host_device_handle_t handle)
     }
     d->kind = kind;
     d->fmt = fmt;
+
+    // Fully open and streaming: remember the handle so the watchdog can probe it.
+    xSemaphoreTake(s_probe_lock, portMAX_DELAY);
+    if (params.proto == HID_PROTOCOL_MOUSE) {
+        s_mouse_handle = handle;
+    } else if (params.proto == HID_PROTOCOL_KEYBOARD) {
+        s_kbd_handle = handle;
+    }
+    xSemaphoreGive(s_probe_lock);
 }
 
 // Runs in the HID host driver's background task — keep it light: just forward
@@ -514,6 +540,11 @@ esp_err_t usb_input_start(usb_mouse_report_cb on_mouse, usb_keyboard_report_cb o
         return ESP_ERR_NO_MEM;
     }
 
+    s_probe_lock = xSemaphoreCreateMutex();
+    if (s_probe_lock == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
     BaseType_t created = xTaskCreatePinnedToCore(
         usb_lib_task, "usb_lib", 4096, xTaskGetCurrentTaskHandle(), 2, NULL, 0);
     if (created != pdTRUE) {
@@ -544,4 +575,34 @@ void usb_input_stats(uint32_t *mouse_reports, uint32_t *kbd_reports, uint32_t *x
     if (mouse_reports) *mouse_reports = s_mouse_reports;
     if (kbd_reports)   *kbd_reports   = s_kbd_reports;
     if (xfer_errors)   *xfer_errors   = s_xfer_errors;
+}
+
+bool usb_input_probe_alive(void)
+{
+    xSemaphoreTake(s_probe_lock, portMAX_DELAY);
+
+    // Prefer the mouse (the device the freeze silences during active use), but a
+    // keyboard-only setup is probed just as well.
+    hid_host_device_handle_t handle = s_mouse_handle ? s_mouse_handle : s_kbd_handle;
+    if (handle == NULL) {
+        // Nothing open to test — silence here is a genuinely idle/absent device,
+        // not a wedged controller. Report alive so the watchdog holds its fire.
+        xSemaphoreGive(s_probe_lock);
+        return true;
+    }
+
+    // GET_PROTOCOL is a mandatory, read-only HID class request every boot device
+    // answers in milliseconds. A wedged USB controller never completes the control
+    // transfer, so hid_control_transfer()'s 5 s wait expires and we get a timeout —
+    // the signal the watchdog acts on.
+    hid_report_protocol_t proto;
+    esp_err_t err = hid_class_request_get_protocol(handle, &proto);
+    xSemaphoreGive(s_probe_lock);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "usb probe: alive");
+        return true;
+    }
+    ESP_LOGW(TAG, "usb probe: TIMEOUT (%s)", esp_err_to_name(err));
+    return false;
 }

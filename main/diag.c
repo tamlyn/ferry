@@ -20,6 +20,18 @@ static const char *TAG = "diag";
 #define TICK_MS                1000
 #define HEARTBEAT_EVERY_TICKS  15     // ~15 s between activity/resource lines
 
+// USB-input stall watchdog (see CLAUDE.md freeze notes + plan). The ESP-IDF USB
+// host controller's interrupt handler silently wedges after a while, so HID reports
+// stop arriving — mouse and keyboard together (they share the one controller). A
+// full re-init via esp_restart() recovers it. We can't reboot on report-silence
+// alone (a genuinely idle mouse looks identical), so once reports go quiet we
+// actively probe a connected device with a GET_PROTOCOL request: a healthy device
+// answers in ms, a wedged controller times out. Two consecutive probe failures =
+// confirmed stall = reboot.
+#define T_SILENCE_MS           3000   // reports quiet this long before we start probing
+#define PROBE_INTERVAL_MS      5000   // min gap between probes (each blocks up to ~5 s)
+#define PROBE_FAILS_TO_REBOOT  2      // consecutive probe timeouts that trigger the reboot
+
 static const char *reset_reason_str(esp_reset_reason_t r)
 {
     switch (r) {
@@ -112,9 +124,69 @@ static void diag_task(void *arg)
     }
 }
 
+// Kept separate from diag_task because its liveness probe blocks up to ~5 s on a
+// wedged controller; running it here means that block never delays the send-wedge
+// check. A BLE host must be subscribed before we probe or reboot: with no host
+// there is nothing driving input and nothing to recover, so silence is expected —
+// gating on ble_hid_ready also means a fresh boot with no reconnected host doesn't
+// probe or reboot-loop.
+static void usb_watchdog_task(void *arg)
+{
+    (void)arg;
+    uint32_t prev_reports = 0;
+    {
+        uint32_t mouse = 0, kbd = 0;
+        usb_input_stats(&mouse, &kbd, NULL);
+        prev_reports = mouse + kbd;
+    }
+
+    TickType_t last_activity = xTaskGetTickCount();
+    TickType_t last_probe    = 0;
+    int fail_count = 0;
+
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(TICK_MS));
+        TickType_t now = xTaskGetTickCount();
+
+        uint32_t mouse = 0, kbd = 0;
+        usb_input_stats(&mouse, &kbd, NULL);
+        uint32_t reports = mouse + kbd;
+        if (reports != prev_reports) {
+            prev_reports = reports;
+            last_activity = now;
+            fail_count = 0;
+            continue;
+        }
+
+        if (now - last_activity < pdMS_TO_TICKS(T_SILENCE_MS)) {
+            continue;
+        }
+        if (!ble_hid_ready(0) && !ble_hid_ready(1)) {
+            continue;
+        }
+        if (now - last_probe < pdMS_TO_TICKS(PROBE_INTERVAL_MS)) {
+            continue;
+        }
+        last_probe = now;
+
+        if (usb_input_probe_alive()) {
+            fail_count = 0;
+            continue;
+        }
+        if (++fail_count >= PROBE_FAILS_TO_REBOOT) {
+            ESP_LOGE(TAG, "USB input wedged (probe timed out) — rebooting to re-enumerate");
+            vTaskDelay(pdMS_TO_TICKS(50));   // let the line clear UART0 first
+            esp_restart();
+        }
+    }
+}
+
 void diag_start(void)
 {
     if (xTaskCreate(diag_task, "diag", 3072, NULL, 4, NULL) != pdPASS) {
         ESP_LOGW(TAG, "diag task not started (out of memory)");
+    }
+    if (xTaskCreate(usb_watchdog_task, "usb_wdt", 3072, NULL, 4, NULL) != pdPASS) {
+        ESP_LOGW(TAG, "usb watchdog task not started (out of memory)");
     }
 }

@@ -1,6 +1,7 @@
 #ifndef USB_INPUT_H
 #define USB_INPUT_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -25,5 +26,13 @@ esp_err_t usb_input_start(usb_mouse_report_cb on_mouse, usb_keyboard_report_cb o
 // diag.c to tell a wedged USB input path (counts flat during a freeze) from a
 // downstream BLE stall (counts still climbing).
 void usb_input_stats(uint32_t *mouse_reports, uint32_t *kbd_reports, uint32_t *xfer_errors);
+
+// Liveness probe for the USB watchdog: issue a benign GET_PROTOCOL control request
+// to a connected boot device. Returns true when the device answers (healthy) or
+// when there is no device to test — silence alone is not a wedge. Returns false
+// *only* when a probe was actually attempted and timed out or errored, which on
+// this hardware means the USB host controller's interrupt has stalled (see the
+// freeze notes in CLAUDE.md). Blocks up to ~5 s on a wedged controller.
+bool usb_input_probe_alive(void);
 
 #endif
