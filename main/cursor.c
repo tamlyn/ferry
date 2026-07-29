@@ -20,8 +20,11 @@
 #define ACCEL_FULL_SPEED   24   // counts/report at which gain reaches the max
 
 // Points of overshoot that must accumulate against one edge before a push counts as
-// a deliberate crossing rather than a fast flick that merely reaches the edge.
-#define EDGE_PUSH_THRESHOLD 250
+// a deliberate crossing rather than a fast flick that merely reaches the edge. Kept
+// low deliberately: crossings should feel immediate, and at ACCEL_MAX_GAIN a fast
+// flick overshoots ~30 points per report, so this is a couple of reports' worth of
+// continued shoving — enough to reject a single stray report, not enough to notice.
+#define EDGE_PUSH_THRESHOLD 60
 
 static int32_t clampi(int32_t v, int32_t lo, int32_t hi)
 {
