@@ -606,7 +606,8 @@ esp_err_t ble_hid_send_mouse(int host, uint8_t buttons, uint16_t x, uint16_t y, 
     return ESP_OK;
 }
 
-esp_err_t ble_hid_send_mouse_rel(int host, int8_t dx, int8_t dy)
+esp_err_t ble_hid_send_mouse_rel(int host, uint8_t buttons, int16_t dx, int16_t dy,
+                                 int8_t wheel, int8_t pan)
 {
     if (host < 0 || host >= BLE_HID_MAX_HOSTS) {
         return ESP_ERR_INVALID_ARG;
@@ -616,7 +617,13 @@ esp_err_t ble_hid_send_mouse_rel(int host, int8_t dx, int8_t dy)
         return ESP_ERR_INVALID_STATE;
     }
 
-    uint8_t report[MOUSE_REL_REPORT_SIZE] = { (uint8_t)dx, (uint8_t)dy };
+    uint8_t report[MOUSE_REL_REPORT_SIZE] = {
+        buttons,
+        (uint8_t)((uint16_t)dx & 0xFF), (uint8_t)((uint16_t)dx >> 8),
+        (uint8_t)((uint16_t)dy & 0xFF), (uint8_t)((uint16_t)dy >> 8),
+        (uint8_t)wheel,
+        (uint8_t)pan,
+    };
     struct os_mbuf *om = ble_hs_mbuf_from_flat(report, sizeof(report));
     if (om == NULL) {
         s_mbuf_fail++;

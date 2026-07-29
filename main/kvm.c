@@ -107,15 +107,16 @@ static int pick_ready(void)
     return -1;
 }
 
-// Walk a host's cursor with a burst of relative motion. The relative report carries
-// no buttons, so the host's button state (last sent on the absolute report) rides
-// through untouched. Blocks the caller (the USB input task) for the burst;
-// acceptable for a deliberate, occasional crossing.
+// Walk a host's cursor with a burst of relative motion. Sent with no buttons, so
+// the host's button state (last sent on the absolute report) rides through
+// untouched — on macOS that is the only place clicks may live (our_descriptor.c).
+// Blocks the caller (the USB input task) for the burst; acceptable for a
+// deliberate, occasional crossing.
 static void nudge_burst(int host, int ax, int ay, int counts)
 {
     int reports = counts / NUDGE_STEP;
     for (int i = 0; i < reports; i++) {
-        ble_hid_send_mouse_rel(host, (int8_t)(ax * NUDGE_STEP), (int8_t)(ay * NUDGE_STEP));
+        ble_hid_send_mouse_rel(host, 0, (int16_t)(ax * NUDGE_STEP), (int16_t)(ay * NUDGE_STEP), 0, 0);
         vTaskDelay(pdMS_TO_TICKS(NUDGE_STEP_MS));
     }
 }

@@ -100,25 +100,33 @@ const uint8_t our_report_descriptor[] = {
 const uint16_t our_report_descriptor_length = sizeof(our_report_descriptor);
 
 // ---------------------------------------------------- Relative pointer (id 3)
-// A second mouse whose X/Y are *relative*, used to nudge the cursor across a
-// display seam onto the adjacent display, from where absolute positioning
-// (report id 1) takes over again. Both pointers drive the one system cursor.
+// A second mouse whose X/Y are *relative*. It has two jobs: nudging the cursor
+// across a display seam on a host that we position absolutely (macOS clamps
+// absolute X/Y to the display the cursor is on), and carrying *all* pointer input
+// for a host we cannot position absolutely at all — Windows maps absolute X/Y to
+// the primary monitor only, so its other displays are unreachable that way.
 //
-// Its shape is forced by two macOS behaviours, both found the hard way:
+// That second job is why this is a full mouse rather than motion alone: if a
+// host's motion arrived here while its clicks and scroll rode report 1, every
+// click would teleport the cursor back to report 1's last absolute position.
 //
-//   1. It lives in its own report map, exposed as a second HID service instance.
-//      If an absolute and a relative pointer share one HID device, macOS moves
-//      the cursor and clicks but never synthesises a drag from the absolute
-//      report's motion — proven by A/B test: identical maps with and without
-//      this collection, drag only works without. DeskHop dodges the same trap
-//      on USB by putting its relative helper mouse on a separate interface;
-//      separate HOGP service instances are the BLE equivalent.
+// It lives in its own report map, exposed as a second HID service instance,
+// because macOS never synthesises a drag from an absolute report's motion if the
+// same HID device also contains a relative pointer — proven by A/B test:
+// identical maps with and without this collection, drag only works without.
+// DeskHop dodges the same trap on USB by putting its relative helper mouse on a
+// separate interface; separate HOGP service instances are the BLE equivalent.
 //
-//   2. It carries no buttons. When it had them (sharing one device with the
-//      absolute pointer), macOS elected it the click owner and ignored the
-//      absolute report's buttons; clicks could be mirrored here, but drags
-//      couldn't, because macOS won't fuse a button held on one pointer with
-//      motion arriving on the other. Buttons live in report id 1 only.
+// The buttons are the known risk here. Back when this pointer *shared one device*
+// with the absolute one, macOS elected it the click owner and ignored report 1's
+// buttons, and mirroring clicks here recovered the click but not click-and-drag
+// (macOS won't fuse a button held on one pointer with motion arriving on the
+// other). Separate instances may well have changed that, but nothing depends on
+// it: the Mac is only ever sent zero buttons here, so its clicks stay on report 1.
+//
+// X/Y are 16-bit so a single report can carry a whole desktop's worth of motion.
+// That is what makes re-synchronising a relative host cheap: one over-range delta
+// pins its cursor into a corner, which the host clamps to a position we know.
 const uint8_t our_rel_report_descriptor[] = {
     0x05, 0x01,                    // Usage Page (Generic Desktop)
     0x09, 0x02,                    // Usage (Mouse)
@@ -126,13 +134,35 @@ const uint8_t our_rel_report_descriptor[] = {
     0x85, REPORT_ID_MOUSE_REL,     //   Report ID (3)
     0x09, 0x01,                    //   Usage (Pointer)
     0xA1, 0x00,                    //   Collection (Physical)
+    0x05, 0x09,                    //     Usage Page (Button)
+    0x19, 0x01,                    //     Usage Minimum (Button 1)
+    0x29, 0x08,                    //     Usage Maximum (Button 8)
+    0x15, 0x00,                    //     Logical Minimum (0)
+    0x25, 0x01,                    //     Logical Maximum (1)
+    0x75, 0x01,                    //     Report Size (1)
+    0x95, 0x08,                    //     Report Count (8)
+    0x81, 0x02,                    //     Input (Data,Var,Abs)
+    0x05, 0x01,                    //     Usage Page (Generic Desktop)
     0x09, 0x30,                    //     Usage (X)
     0x09, 0x31,                    //     Usage (Y)
+    0x16, 0x01, 0x80,              //     Logical Minimum (-32767)
+    0x26, 0xFF, 0x7F,              //     Logical Maximum (32767)
+    0x75, 0x10,                    //     Report Size (16)
+    0x95, 0x02,                    //     Report Count (2)
+    0x81, 0x06,                    //     Input (Data,Var,Rel)   relative X/Y
+    0x09, 0x38,                    //     Usage (Wheel)
     0x15, 0x81,                    //     Logical Minimum (-127)
     0x25, 0x7F,                    //     Logical Maximum (127)
     0x75, 0x08,                    //     Report Size (8)
-    0x95, 0x02,                    //     Report Count (2)
-    0x81, 0x06,                    //     Input (Data,Var,Rel)   relative X/Y
+    0x95, 0x01,                    //     Report Count (1)
+    0x81, 0x06,                    //     Input (Data,Var,Rel)
+    0x05, 0x0C,                    //     Usage Page (Consumer)
+    0x0A, 0x38, 0x02,              //     Usage (AC Pan)
+    0x15, 0x81,                    //     Logical Minimum (-127)
+    0x25, 0x7F,                    //     Logical Maximum (127)
+    0x75, 0x08,                    //     Report Size (8)
+    0x95, 0x01,                    //     Report Count (1)
+    0x81, 0x06,                    //     Input (Data,Var,Rel)   horizontal pan
     0xC0,                          //   End Collection
     0xC0,                          // End Collection
 };

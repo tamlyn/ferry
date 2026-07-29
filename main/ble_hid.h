@@ -31,13 +31,15 @@ bool ble_hid_ready(int host);
 // wire if that host subscribed, so input never leaks to the wrong machine.
 esp_err_t ble_hid_send_mouse(int host, uint8_t buttons, uint16_t x, uint16_t y, int8_t wheel, int8_t pan);
 
-// Send a *relative* pointer report (report id 3) to host `host` — a signed dx/dy
-// delta, the only motion that crosses a display boundary that absolute positioning
-// is clamped within. Motion only: buttons ride the absolute report, and report 3
-// must not carry any (see our_descriptor.c). Dropped if the host hasn't subscribed
-// to the relative report. The KVM uses it to walk the cursor onto an adjacent
-// display, after which absolute positioning re-sticks there.
-esp_err_t ble_hid_send_mouse_rel(int host, int8_t dx, int8_t dy);
+// Send a *relative* pointer report (report id 3) to host `host`: the same shape as
+// the absolute report but with signed 16-bit dx/dy in place of a position. Relative
+// motion is the only motion that crosses a display boundary absolute positioning is
+// clamped within, and the only motion at all for a host whose secondary displays
+// absolute positioning cannot reach. Dropped if the host hasn't subscribed to the
+// relative report. Pass buttons = 0 for a host whose clicks ride the absolute
+// report — see our_descriptor.c for why the Mac's must.
+esp_err_t ble_hid_send_mouse_rel(int host, uint8_t buttons, int16_t dx, int16_t dy,
+                                 int8_t wheel, int8_t pan);
 
 // Send a boot-keyboard report to host `host`: a modifier bitmask plus up to six
 // concurrent keycodes (0 = unused slot).
