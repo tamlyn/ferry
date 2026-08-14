@@ -19,13 +19,6 @@
 #define ACCEL_MAX_GAIN    320   // 1.25x — gain for fast flicks (a boost past 1:1)
 #define ACCEL_FULL_SPEED   24   // counts/report at which gain reaches the max
 
-// Points of overshoot that must accumulate against one edge before a push counts as
-// a deliberate crossing rather than a fast flick that merely reaches the edge. Kept
-// low deliberately: crossings should feel immediate, and at ACCEL_MAX_GAIN a fast
-// flick overshoots ~30 points per report, so this is a couple of reports' worth of
-// continued shoving — enough to reject a single stray report, not enough to notice.
-#define EDGE_PUSH_THRESHOLD 60
-
 static int32_t clampi(int32_t v, int32_t lo, int32_t hi)
 {
     return v < lo ? lo : (v > hi ? hi : v);
@@ -50,7 +43,7 @@ void cursor_init(cursor_t *c, int32_t x, int32_t y)
     c->push_edge = EDGE_NONE;
 }
 
-edge_t cursor_move(cursor_t *c, int dx, int dy, rect_t b)
+void cursor_move(cursor_t *c, int dx, int dy, rect_t b, cursor_step_t *out)
 {
     // Scale the raw counts by a speed-dependent gain, carrying the sub-point
     // remainder so slow motion (gain < 1) still moves instead of truncating to zero.
@@ -88,14 +81,14 @@ edge_t cursor_move(cursor_t *c, int dx, int dy, rect_t b)
             c->push_edge = edge;
             c->push = over;
         }
-        if (c->push >= EDGE_PUSH_THRESHOLD) {
-            c->push = 0;
-            c->push_edge = EDGE_NONE;
-            return edge;
-        }
     } else {
         c->push = 0;
         c->push_edge = EDGE_NONE;
+        edge = EDGE_NONE;   // touching an edge while moving away isn't a crossing
     }
-    return EDGE_NONE;
+
+    out->raw_x = nx;
+    out->raw_y = ny;
+    out->edge = edge;
+    out->push = c->push;
 }

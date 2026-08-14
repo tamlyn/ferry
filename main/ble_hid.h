@@ -24,6 +24,12 @@ esp_err_t ble_hid_init(void);
 // dropped. `host` out of range returns false.
 bool ble_hid_ready(int host);
 
+// True once host `host` has also subscribed to the relative-pointer report. A host
+// driven by relative motion sends every pointer report there, so it is not drivable
+// at all until this holds — unlike an absolutely-positioned host, for which the
+// relative report only carries the occasional seam nudge.
+bool ble_hid_rel_ready(int host);
+
 // Send an absolute-pointer report to host `host`. buttons is a bitmask (bit0 =
 // left, bit1 = right, bit2 = middle, bit3 = back, bit4 = forward...); x/y are
 // absolute coordinates in 0..ABS_AXIS_MAX; wheel is a signed vertical scroll

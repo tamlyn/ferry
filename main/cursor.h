@@ -16,11 +16,25 @@ typedef struct {
     edge_t  push_edge;   // the edge currently being pushed into
 } cursor_t;
 
-void   cursor_init(cursor_t *c, int32_t x, int32_t y);
+// What one report of motion did. `raw_x`/`raw_y` is where the motion would have
+// landed had the display's rectangle not clamped it — the position to resume at on
+// the far side of a seam the host crosses under its own steam. What a relative host
+// gets sent is deliberately *not* here: it is the model's own displacement over the
+// whole report, crossings included, which only the KVM can measure. Sending the
+// pre-clamp delta instead lets the host's cursor travel where the model would not,
+// and the two then disagree permanently (a model wall that isn't a real wall slides
+// the whole model sideways one shove at a time).
+typedef struct {
+    int32_t raw_x, raw_y;
+    edge_t  edge;   // edge being pushed into, or EDGE_NONE
+    int32_t push;   // overshoot accumulated against `edge` so far
+} cursor_step_t;
 
-// Apply a relative mouse delta, clamped to `bounds`. Returns the edge that has been
-// decisively pushed past (a sustained, directed shove — a fast flick that merely
-// reaches the edge won't trigger it), or EDGE_NONE.
-edge_t cursor_move(cursor_t *c, int dx, int dy, rect_t bounds);
+void cursor_init(cursor_t *c, int32_t x, int32_t y);
+
+// Apply a relative mouse delta, clamped to `bounds`, and report what happened. How
+// much of a push counts as a deliberate crossing is the caller's policy, not ours —
+// it varies by what lies across the edge (see kvm.c).
+void cursor_move(cursor_t *c, int dx, int dy, rect_t bounds, cursor_step_t *out);
 
 #endif

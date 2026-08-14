@@ -23,6 +23,7 @@
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
 #include "host/ble_gap.h"
+#include "host/ble_l2cap.h"
 #include "host/ble_store.h"
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
@@ -268,6 +269,59 @@ static void log_peer_id(const char *when, uint16_t conn_handle)
              desc.peer_id_addr.type);
 }
 
+// Windows settles on a 15 ms connection interval, which delivers a ~125 Hz mouse in
+// uneven bunches — one report in some connection events, two in the next. A host we
+// position absolutely absorbs that, because every report is ground truth and the
+// cursor lands on the true position regardless; a host driven by relative motion
+// reproduces the bunching faithfully, and the uneven steps read as judder even though
+// the total travel is right. Ask for half that, which also interleaves harmonically
+// with the 15 ms the Mac settles on rather than beating against it.
+// Asked for as a range, not a single value, so the controller can fit these events
+// around the other host's link; and asked for a couple of seconds after the link
+// comes up rather than immediately, because an update issued while the connection is
+// still settling — feature exchange, encryption, the host's subscribe storm — is
+// refused outright ("invalid HCI command parameters"). Anything below the 15 ms both
+// hosts settle on is a win: 15 ms is 66.7 cursor updates a second against a 60 Hz
+// panel, which beats at ~7 Hz and reads as judder on a relatively-driven host.
+// The range must *exclude* the interval we already have, or the central satisfies the
+// request by doing nothing: asked for 7.5-15 ms, Windows accepted and stayed at 15.
+#define FAST_CONN_ITVL_MIN   6   // units of 1.25 ms -> 7.5 ms
+#define FAST_CONN_ITVL_MAX   8   //                  -> 10 ms
+#define CONN_TIMEOUT_10MS  200   // 2 s, matching what the hosts ask for themselves
+#define PARAM_REQ_DELAY_MS 2000
+
+static struct ble_npl_callout s_param_co;
+static uint16_t s_param_conn;
+
+// The central's verdict on the L2CAP request — the only place it is visible, since a
+// rejection produces no connection update to notice the absence of.
+static void l2cap_update_done(uint16_t conn_handle, int status, void *arg)
+{
+    (void)arg;
+    ESP_LOGI(TAG, "L2CAP param request answered (conn=%d status=%d)", conn_handle, status);
+}
+
+// A peripheral cannot command a new interval, only ask, and this controller refuses
+// the HCI route outright — ble_gap_update_params returns "invalid HCI command
+// parameters" here however the request is shaped, connected or settled. The L2CAP
+// signalling request is the peripheral's proper mechanism anyway, and Windows honours
+// it. If it is ever declined we simply keep the interval we were given.
+static void request_fast_interval(struct ble_npl_event *ev)
+{
+    (void)ev;
+    uint16_t conn = s_param_conn;
+    struct ble_l2cap_sig_update_params lp = {
+        .itvl_min            = FAST_CONN_ITVL_MIN,
+        .itvl_max            = FAST_CONN_ITVL_MAX,
+        .slave_latency       = 0,
+        .timeout_multiplier  = CONN_TIMEOUT_10MS,
+    };
+    int rc = ble_l2cap_sig_update(conn, &lp, l2cap_update_done, NULL);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "L2CAP param request failed (conn=%d rc=%d)", conn, rc);
+    }
+}
+
 static int ble_gap_event(struct ble_gap_event *event, void *arg)
 {
     switch (event->type) {
@@ -278,6 +332,13 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
                      event->connect.conn_handle, s ? (int)(s - s_hosts) : -1);
             log_conn_params("conn params", event->connect.conn_handle);
             log_peer_id("connect", event->connect.conn_handle);
+            // Only the relatively-driven host needs the faster interval; the Mac
+            // renegotiates its own anyway. Deferred — see request_fast_interval.
+            if (s && (int)(s - s_hosts) != SLOT_MAC) {
+                s_param_conn = event->connect.conn_handle;
+                ble_npl_callout_reset(&s_param_co,
+                                      ble_npl_time_ms_to_ticks32(PARAM_REQ_DELAY_MS));
+            }
         } else {
             ESP_LOGW(TAG, "connect failed; status=%d", event->connect.status);
             // A connection that dies during establishment gets a failed CONNECT
@@ -299,6 +360,9 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
             ESP_LOGI(TAG, "host disconnected (conn=%d, reason=%d), freeing slot",
                      event->disconnect.conn.conn_handle, event->disconnect.reason);
             *s = (host_slot_t){0};
+        }
+        if (event->disconnect.conn.conn_handle == s_param_conn) {
+            ble_npl_callout_stop(&s_param_co);   // don't fire at a dead handle
         }
         advertise_if_slot_free();
         return 0;
@@ -509,6 +573,11 @@ esp_err_t ble_hid_init(void)
     ble_hs_cfg.sm_our_key_dist   = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
 
+    // Runs the deferred parameter request on the NimBLE host task, where calling back
+    // into the stack is safe.
+    ble_npl_callout_init(&s_param_co, nimble_port_get_dflt_eventq(),
+                         request_fast_interval, NULL);
+
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.gatts_register_cb = gatt_svr_register_cb;
@@ -564,6 +633,15 @@ bool ble_hid_ready(int host)
     }
     const host_slot_t *s = &s_hosts[host];
     return s->in_use && s->mouse_sub && s->kbd_sub;
+}
+
+bool ble_hid_rel_ready(int host)
+{
+    if (host < 0 || host >= BLE_HID_MAX_HOSTS) {
+        return false;
+    }
+    const host_slot_t *s = &s_hosts[host];
+    return s->in_use && s->mouse_rel_sub;
 }
 
 esp_err_t ble_hid_send_mouse(int host, uint8_t buttons, uint16_t x, uint16_t y, int8_t wheel, int8_t pan)
@@ -629,8 +707,22 @@ esp_err_t ble_hid_send_mouse_rel(int host, uint8_t buttons, int16_t dx, int16_t 
         s_mbuf_fail++;
         return ESP_ERR_NO_MEM;
     }
+    s_tx_attempt[host]++;
     int rc = notify_watched(s->conn_handle, s_mouse_rel_val_handle, om);
-    return rc == 0 ? ESP_OK : ESP_FAIL;
+    if (rc != 0) {
+        // A dropped relative report is worse than a dropped absolute one: the motion
+        // it carried is gone rather than superseded, so the host's cursor falls
+        // behind this model until the next re-sync. Log sparsely so a starving link
+        // is visible without flooding UART0.
+        static unsigned drops;
+        if ((++drops & 0x7F) == 1) {
+            ESP_LOGW(TAG, "rel mouse notify failed (conn=%d rc=%d, %u drops total)",
+                     s->conn_handle, rc, drops);
+        }
+        return ESP_FAIL;
+    }
+    s_tx_ok[host]++;
+    return ESP_OK;
 }
 
 esp_err_t ble_hid_send_keyboard(int host, uint8_t modifiers, const uint8_t keys[6])

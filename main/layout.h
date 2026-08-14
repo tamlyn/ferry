@@ -1,6 +1,7 @@
 #ifndef LAYOUT_H
 #define LAYOUT_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 // The desk model: a set of display rectangles in one global "points" coordinate
@@ -10,9 +11,12 @@
 // at any display edge, whether the cursor crosses to another display and how.
 //
 // Two kinds of seam fall out of the geometry: a border between two displays of the
-// *same* host (crossed with a relative-motion nudge, since absolute positioning is
-// clamped to the display the host's cursor is on) and a border between displays of
-// *different* hosts (crossed by switching which host we drive). See kvm.c.
+// *same* host, and a border between displays of *different* hosts (crossed by
+// switching which host we drive). What a same-host seam costs depends on how that
+// host is driven — an absolutely-positioned host has to be nudged across it, since
+// absolute positioning is clamped to the display its cursor is on, whereas a host
+// driven relatively walks across on its own and only this model has to follow.
+// See kvm.c.
 
 typedef enum {
     EDGE_NONE = 0,
@@ -41,6 +45,15 @@ int    layout_display_count(void);
 int    layout_host_of(int disp);        // BLE host slot a display belongs to
 rect_t layout_rect(int disp);
 int    layout_home_display(int host);   // default display when a host is first driven
+
+// True if `host` must be driven with relative motion because absolute positioning
+// cannot reach all of its displays. See layout.c for which host and why.
+bool   layout_host_relative(int host);
+
+// The corner of `host`'s desktop that an over-range relative report pins its cursor
+// into, in global points, and the display that corner belongs to (-1 if the host owns
+// none). The only way to know where a relative host's cursor is, is to put it there.
+int    layout_resync_corner(int host, int32_t *gx, int32_t *gy);
 
 // Runtime layout selection. layout_set_active is called only from the KVM (input
 // task); the accessors above read the active layout. Use kvm_request_layout to switch
