@@ -26,11 +26,27 @@ static const char *TAG = "diag";
 // full re-init via esp_restart() recovers it. We can't reboot on report-silence
 // alone (a genuinely idle mouse looks identical), so once reports go quiet we
 // actively probe a connected device with a GET_PROTOCOL request: a healthy device
-// answers in ms, a wedged controller times out. Two consecutive probe failures =
-// confirmed stall = reboot.
+// answers in ms, a wedged controller doesn't.
+//
+// Confirmation is over *elapsed time*, not just a count of failures, because
+// consecutive failures are not independent evidence. A probe that times out leaves
+// its control transfer outstanding, so the next one cannot even be submitted and
+// fails whatever the controller's true state — two failures in quick succession are
+// one observation wearing two hats. Demanding that the failures also span
+// FAIL_WINDOW_MS is what makes them count: a transient stall clears and answers the
+// next probe, a wedged controller keeps failing for as long as we care to ask.
+// (Before this the interval was stamped *before* the blocking probe, so its 5 s gap
+// collapsed to the 1 s tick and a single timeout rebooted the device ~1 s later.)
 #define T_SILENCE_MS           3000   // reports quiet this long before we start probing
-#define PROBE_INTERVAL_MS      5000   // min gap between probes (each blocks up to ~5 s)
-#define PROBE_FAILS_TO_REBOOT  2      // consecutive probe timeouts that trigger the reboot
+#define PROBE_INTERVAL_MS      5000   // gap between probes, measured from the last one finishing
+#define PROBE_FAILS_TO_REBOOT     3   // failures needed...
+#define FAIL_WINDOW_MS        15000   // ...and the span they must cover, before we call it wedged
+
+// A desk nobody is sitting at needs no fast probing, and every probe is a control
+// transfer injected alongside the HID interrupt pipes on a controller with a known
+// wedging bug — so back right off once silence stops looking like a pause in use.
+#define IDLE_AFTER_MS         30000
+#define IDLE_PROBE_INTERVAL_MS 30000
 
 static const char *reset_reason_str(esp_reset_reason_t r)
 {
@@ -142,6 +158,7 @@ static void usb_watchdog_task(void *arg)
 
     TickType_t last_activity = xTaskGetTickCount();
     TickType_t last_probe    = 0;
+    TickType_t first_fail    = 0;
     int fail_count = 0;
 
     for (;;) {
@@ -164,17 +181,30 @@ static void usb_watchdog_task(void *arg)
         if (!ble_hid_ready(0) && !ble_hid_ready(1)) {
             continue;
         }
-        if (now - last_probe < pdMS_TO_TICKS(PROBE_INTERVAL_MS)) {
+        // Backing off only holds while nothing looks wrong. A controller that wedges
+        // during a long idle spell still looks idle when its owner comes back — the
+        // mouse they are moving produces no reports — so once a probe has failed we
+        // return to the fast cadence rather than confirming at 30 s a go.
+        bool idle = fail_count == 0 && (now - last_activity) >= pdMS_TO_TICKS(IDLE_AFTER_MS);
+        if (now - last_probe < pdMS_TO_TICKS(idle ? IDLE_PROBE_INTERVAL_MS
+                                                  : PROBE_INTERVAL_MS)) {
             continue;
         }
-        last_probe = now;
 
-        if (usb_input_probe_alive()) {
+        bool alive = usb_input_probe_alive();
+        last_probe = xTaskGetTickCount();   // on completion: the probe blocks up to ~5 s
+
+        if (alive) {
             fail_count = 0;
             continue;
         }
-        if (++fail_count >= PROBE_FAILS_TO_REBOOT) {
-            ESP_LOGE(TAG, "USB input wedged (probe timed out) — rebooting to re-enumerate");
+        if (fail_count++ == 0) {
+            first_fail = last_probe;
+        }
+        TickType_t failing_for = last_probe - first_fail;
+        if (fail_count >= PROBE_FAILS_TO_REBOOT && failing_for >= pdMS_TO_TICKS(FAIL_WINDOW_MS)) {
+            ESP_LOGE(TAG, "USB input wedged (%d probes failed over %ums) — rebooting to re-enumerate",
+                     fail_count, (unsigned)pdTICKS_TO_MS(failing_for));
             vTaskDelay(pdMS_TO_TICKS(50));   // let the line clear UART0 first
             esp_restart();
         }

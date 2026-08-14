@@ -593,8 +593,13 @@ bool usb_input_probe_alive(void)
 
     // GET_PROTOCOL is a mandatory, read-only HID class request every boot device
     // answers in milliseconds. A wedged USB controller never completes the control
-    // transfer, so hid_control_transfer()'s 5 s wait expires and we get a timeout —
-    // the signal the watchdog acts on.
+    // transfer, so hid_control_transfer()'s 5 s wait expires — the signal the
+    // watchdog acts on. Note the two distinct failures the caller sees: ESP_ERR_TIMEOUT
+    // is that expiry, whereas ESP_ERR_NOT_FINISHED means the transfer could not even
+    // be submitted because a previous one is still outstanding — the guaranteed
+    // sequel to a timeout rather than a fresh observation. Both are logged with the
+    // error name so a capture can tell them apart; see the watchdog in diag.c for why
+    // that distinction matters.
     hid_report_protocol_t proto;
     esp_err_t err = hid_class_request_get_protocol(handle, &proto);
     xSemaphoreGive(s_probe_lock);
@@ -603,6 +608,6 @@ bool usb_input_probe_alive(void)
         ESP_LOGI(TAG, "usb probe: alive");
         return true;
     }
-    ESP_LOGW(TAG, "usb probe: TIMEOUT (%s)", esp_err_to_name(err));
+    ESP_LOGW(TAG, "usb probe: no answer (%s)", esp_err_to_name(err));
     return false;
 }
