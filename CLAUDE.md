@@ -239,15 +239,29 @@ on macOS or only with two hosts.
    immediately. Same flush — Remove device, toggle the Bluetooth radio (or uninstall
    the stale HID entry in Device Manager with *show hidden devices*), then re-pair.
 
+10. **Host bonded but stuck "Not Connected" while the device log stays silent — that's
+    a stale host `bluetoothd`, not a device fault.** The device was advertising the
+    whole time (`connectable=true`, public identity address, a slot free) and the Mac
+    simply never dialled. **The silence is the diagnostic**: gotcha #4's stale bond
+    fills the device log with connect / `encryption change status=7` / disconnect at
+    ~1.4×/sec, whereas a host that has given up dialling produces *no* device-side
+    events at all. So check the device end first (`swift tools/scan.swift` — an advert
+    with `connectable=true` also proves a slot is free, since advertising only runs
+    while one is), then toggle the host's Bluetooth off/on; that alone fixed it. Don't
+    reach for forget + re-pair unless the log shows the device actually rejecting the
+    host — re-pairing under a new identity address is what evicts the *other* host's
+    bond (gotcha #2).
+
 ## Observing BLE from the dev Mac
 
 The Mac running the toolchain is also one of the two KVM hosts, so both ends of a BLE
 problem are observable locally:
 
-- **Is the device advertising?** A short Swift CoreBluetooth scanner (`swift
-  scan.swift`, needs Bluetooth TCC — run outside the sandbox) sees the "Ferry"
-  advert within seconds. Ground truth when the firmware's "advertising" log is in
-  doubt.
+- **Is the device advertising?** `swift tools/scan.swift [seconds]` (needs Bluetooth
+  TCC — run outside the sandbox) sees the "Ferry" advert within seconds. Ground truth
+  when the firmware's "advertising" log is in doubt; `connectable=true` also proves a
+  slot is free, since advertising only runs while one is. It scans but never connects
+  — an app-initiated bond is the gotcha #2 eviction hazard.
 - **Is the Mac bonded/connected?** `system_profiler SPBluetoothDataType` lists Ferry
   (address `68:EE:8F:63:97:32`) under Connected / Not Connected.
 
