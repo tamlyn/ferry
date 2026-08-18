@@ -41,6 +41,13 @@ of pulsing. Don't capture with `stty -f <port> …` + `cat`: macOS resets the te
 settings between the two opens, so the capture records garbage at the wrong baud.
 Keep the port held open by one process (pyserial) for the whole session.
 
+`tools/capture.py` does all of this: it holds the port open across reboots, reopens it
+when the cable comes and goes, and writes a per-day log plus an events file containing
+only reboots, wedges, self-healed stalls and faults. It also clears the modem-control
+bits on the raw fd before pyserial configures the port — pyserial deasserts RTS/DTR
+only *after* `os.open()` has let the driver assert them, which is long enough to reset
+the chip (seen: a POWERON reset 200 ms after attaching).
+
 **Hold DTR deasserted while reading** (`p.dtr = False`). The BOOT button (GPIO0) is
 the layout selector (see below), and GPIO0 is tied into the serial auto-reset circuit
 — asserting DTR, which pyserial does by default on open, pulls GPIO0 low and registers
