@@ -12,6 +12,8 @@ CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 # must support hubs (off by default). Low-speed devices behind a hub — most
 # basic wired mice and keyboards — are supported out of the box as of ESP-IDF
 # v5.5; on v5.4 that needed experimental flags and crashed on enumeration errors.
+# Since v6 this option is defined by the `espressif/usb` managed component (the
+# host stack moved out of the IDF tree), not by ESP-IDF itself.
 CONFIG_USB_HOST_HUBS_SUPPORTED=y
 
 # Bluetooth: we present as a BLE HID-over-GATT peripheral (mouse + keyboard) via

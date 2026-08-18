@@ -8,17 +8,17 @@ hit so they don't have to be rediscovered.
 
 ## Build & flash
 
-ESP-IDF **v5.5.4**, installed via `eim` (Espressif's installer). The environment
+ESP-IDF **v6.0.2**, installed via `eim` (Espressif's installer). The environment
 must be activated before any `idf.py` — source the script matching the shell that
 actually runs the command:
 
 ```sh
 # bash (the shell Claude's Bash tool runs)
-source ~/.espressif/tools/activate_idf_v5.5.4.sh && idf.py build
+source ~/.espressif/tools/activate_idf_v6.0.2.sh && idf.py build
 ```
 ```fish
 # fish (Tamlyn's interactive shell)
-source ~/.espressif/tools/activate_idf_v5.5.4.fish
+source ~/.espressif/tools/activate_idf_v6.0.2.fish
 ```
 
 - **Flash** over the UART-bridge port (see hardware constraints — *not* the native
@@ -81,8 +81,11 @@ The board is a 44-pin **ESP32-S3-WROOM-1 N16R8** dev board
   that joint first. Side effect: the OTG port now always sources 5 V, so don't plug
   the board into a PC as a USB *device* via that port (two 5 V sources would fight).
 - **USB hub support needs ESP-IDF ≥ 5.5.** v5.4's experimental external-hub code
-  asserted and reboot-looped on hub enumeration glitches; v5.5 makes low-speed
-  devices behind a hub supported. That's why the project is pinned to v5.5.4.
+  asserted and reboot-looped on hub enumeration glitches; v5.5 made low-speed devices
+  behind a hub supported. On v6 the USB host stack moved out of ESP-IDF into the
+  `espressif/usb` managed component (pulled in automatically as a dependency of
+  `usb_host_hid`), so `CONFIG_USB_HOST_HUBS_SUPPORTED` is now defined by that
+  component rather than by the IDF tree — the option name and behaviour are unchanged.
 - **A power dip *while tethered* leaves the board dead, not rebooted.** Seen
   2026-08-18: `rst:0x1 (POWERON),boot:0x0 (DOWNLOAD(USB/UART0))` — the board's rail
   dipped, and because the CH9102 stays powered from the host it held GPIO0 (via DTR)

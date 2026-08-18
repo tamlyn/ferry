@@ -125,7 +125,7 @@ pairing time.
 
 ## Building
 
-Firmware is built with ESP-IDF v5.5.4. See [CLAUDE.md](CLAUDE.md) for the full build,
+Firmware is built with ESP-IDF v6.0.2. See [CLAUDE.md](CLAUDE.md) for the full build,
 flash, and log-capture workflow, the hardware wiring constraints, and the Bluetooth
 implementation notes.
 
