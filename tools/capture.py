@@ -25,7 +25,14 @@ import serial.serialposix as sp
 # The dev-kit's UART-bridge port (WCH CH9102) -- the same port used to flash, never
 # the native USB port, which hosts the mouse + keyboard. Override with FERRY_PORT.
 PORT = os.environ.get("FERRY_PORT", "/dev/cu.usbmodem5C843191521")
-NOTABLE = re.compile(rb"previous boot ended|wedged|recovered after|<-- fault|rst:0x|# port ")
+NOTABLE = re.compile(rb"previous boot ended|wedged|recovered after|<-- fault|rst:0x|# port |# rescued")
+
+# A power dip while this capture is attached leaves the board in the ROM download
+# stub rather than running: the USB-serial bridge stays powered from the host side,
+# and its DTR line holds GPIO0 low through the ESP32's power-up. Standalone the same
+# dip boots normally, so the tether is what turns a survivable glitch into a board
+# that needs a human. Pulse EN with GPIO0 held high and it comes back on its own.
+DOWNLOAD_STUB = re.compile(rb"waiting for download")
 
 _MODEM_CLEAR = struct.pack("I", sp.TIOCM_DTR | sp.TIOCM_RTS)
 _os_open = os.open
@@ -54,6 +61,14 @@ def emit(f, line):
     f.write(line + b"\n")
     if NOTABLE.search(line):
         events.write(line + b"\n")
+
+
+def rescue_from_download(port, f):
+    port.dtr = False   # GPIO0 high -> boot the app, not the stub
+    port.rts = True    # EN low -> reset
+    time.sleep(0.15)
+    port.rts = False
+    emit(f, ("%s # rescued from download mode (power dip while tethered)" % stamp()).encode())
 
 
 def open_port():
@@ -114,4 +129,7 @@ while True:
     buf += data
     while b"\n" in buf:
         line, buf = buf.split(b"\n", 1)
-        emit(f, stamp().encode() + b" " + line.rstrip(b"\r"))
+        line = line.rstrip(b"\r")
+        emit(f, stamp().encode() + b" " + line)
+        if DOWNLOAD_STUB.search(line):
+            rescue_from_download(port, f)

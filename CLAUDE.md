@@ -83,6 +83,14 @@ The board is a 44-pin **ESP32-S3-WROOM-1 N16R8** dev board
 - **USB hub support needs ESP-IDF ≥ 5.5.** v5.4's experimental external-hub code
   asserted and reboot-looped on hub enumeration glitches; v5.5 makes low-speed
   devices behind a hub supported. That's why the project is pinned to v5.5.4.
+- **A power dip *while tethered* leaves the board dead, not rebooted.** Seen
+  2026-08-18: `rst:0x1 (POWERON),boot:0x0 (DOWNLOAD(USB/UART0))` — the board's rail
+  dipped, and because the CH9102 stays powered from the host it held GPIO0 (via DTR)
+  low through the power-up, so the ROM landed in the download stub and sat at
+  `waiting for download` until reset. Standalone the same dip boots normally; the
+  serial cable is what turns it fatal. `tools/capture.py` now spots the stub and
+  pulses EN with GPIO0 held high to recover it unattended.
+
 - **Watch — standalone-power stability.** Seen once: a few seconds unresponsive, LED
   flash, then recovery — but it coincided with swapping the USB power source, i.e. a
   plain power-cycle (the boot log confirmed a clean `POWERON` reset, and it then ran
