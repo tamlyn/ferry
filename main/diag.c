@@ -239,6 +239,13 @@ static void usb_watchdog_task(void *arg)
         last_probe = xTaskGetTickCount();   // on completion: the probe blocks up to ~5 s
 
         if (alive) {
+            // Whether a stall ever heals on its own is the number that sets
+            // FAIL_WINDOW_MS: the wait is pure freeze time (the reboot itself costs
+            // ~1.5 s), so it is only worth paying if stalls do sometimes clear.
+            if (fail_count > 0) {
+                ESP_LOGW(TAG, "usb probe recovered after %d failure(s) over %ums — stall was transient",
+                         fail_count, (unsigned)pdTICKS_TO_MS(last_probe - first_fail));
+            }
             fail_count = 0;
             continue;
         }
