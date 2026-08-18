@@ -269,24 +269,30 @@ static void log_peer_id(const char *when, uint16_t conn_handle)
              desc.peer_id_addr.type);
 }
 
-// Windows settles on a 15 ms connection interval, which delivers a ~125 Hz mouse in
-// uneven bunches — one report in some connection events, two in the next. A host we
-// position absolutely absorbs that, because every report is ground truth and the
-// cursor lands on the true position regardless; a host driven by relative motion
-// reproduces the bunching faithfully, and the uneven steps read as judder even though
-// the total travel is right. Ask for half that, which also interleaves harmonically
-// with the 15 ms the Mac settles on rather than beating against it.
-// Asked for as a range, not a single value, so the controller can fit these events
-// around the other host's link; and asked for a couple of seconds after the link
-// comes up rather than immediately, because an update issued while the connection is
-// still settling — feature exchange, encryption, the host's subscribe storm — is
-// refused outright ("invalid HCI command parameters"). Anything below the 15 ms both
-// hosts settle on is a win: 15 ms is 66.7 cursor updates a second against a 60 Hz
-// panel, which beats at ~7 Hz and reads as judder on a relatively-driven host.
-// The range must *exclude* the interval we already have, or the central satisfies the
-// request by doing nothing: asked for 7.5-15 ms, Windows accepted and stayed at 15.
-#define FAST_CONN_ITVL_MIN   6   // units of 1.25 ms -> 7.5 ms
-#define FAST_CONN_ITVL_MAX   8   //                  -> 10 ms
+// The interval we ask the relatively-driven host to use. A host positioned
+// absolutely absorbs uneven report delivery — every report is ground truth, so the
+// cursor lands in the right place regardless — but a relatively-driven one
+// reproduces the bunching faithfully and it reads as judder. Asking for 7.5 ms
+// halved the bunching and did fix the judder.
+//
+// It is back at 15 ms because halving the interval doubles the radio's duty cycle,
+// and USB host wedges (see diag.c) cluster in the seconds after a host switch, when
+// BLE traffic peaks — the S3's USB host bug is an ISR race, and starving that ISR is
+// a plausible way to lose it. Whether the two are actually related is being measured;
+// if they are not, this goes back to 6/8.
+//
+// Note a central may *persist* these parameters against the bond: after a spell at
+// 7.5 ms, Windows began initiating at 7.5 ms on its own, so simply not asking no
+// longer restores the default. The interval has to be asked for explicitly either
+// way, and the range must *exclude* the interval currently in use, or the central
+// satisfies the request by doing nothing.
+//
+// Asked for a couple of seconds after the link comes up rather than immediately: an
+// update issued while the connection is still settling — feature exchange,
+// encryption, the host's subscribe storm — is refused outright ("invalid HCI command
+// parameters").
+#define CONN_ITVL_REQ_MIN   12   // units of 1.25 ms -> 15 ms
+#define CONN_ITVL_REQ_MAX   14   //                  -> 17.5 ms
 #define CONN_TIMEOUT_10MS  200   // 2 s, matching what the hosts ask for themselves
 #define PARAM_REQ_DELAY_MS 2000
 
@@ -306,13 +312,13 @@ static void l2cap_update_done(uint16_t conn_handle, int status, void *arg)
 // parameters" here however the request is shaped, connected or settled. The L2CAP
 // signalling request is the peripheral's proper mechanism anyway, and Windows honours
 // it. If it is ever declined we simply keep the interval we were given.
-static void request_fast_interval(struct ble_npl_event *ev)
+static void request_interval(struct ble_npl_event *ev)
 {
     (void)ev;
     uint16_t conn = s_param_conn;
     struct ble_l2cap_sig_update_params lp = {
-        .itvl_min            = FAST_CONN_ITVL_MIN,
-        .itvl_max            = FAST_CONN_ITVL_MAX,
+        .itvl_min            = CONN_ITVL_REQ_MIN,
+        .itvl_max            = CONN_ITVL_REQ_MAX,
         .slave_latency       = 0,
         .timeout_multiplier  = CONN_TIMEOUT_10MS,
     };
@@ -332,8 +338,8 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
                      event->connect.conn_handle, s ? (int)(s - s_hosts) : -1);
             log_conn_params("conn params", event->connect.conn_handle);
             log_peer_id("connect", event->connect.conn_handle);
-            // Only the relatively-driven host needs the faster interval; the Mac
-            // renegotiates its own anyway. Deferred — see request_fast_interval.
+            // Only the relatively-driven host is asked; the Mac renegotiates its
+            // own anyway. Deferred — see request_interval.
             if (s && (int)(s - s_hosts) != SLOT_MAC) {
                 s_param_conn = event->connect.conn_handle;
                 ble_npl_callout_reset(&s_param_co,
@@ -576,7 +582,7 @@ esp_err_t ble_hid_init(void)
     // Runs the deferred parameter request on the NimBLE host task, where calling back
     // into the stack is safe.
     ble_npl_callout_init(&s_param_co, nimble_port_get_dflt_eventq(),
-                         request_fast_interval, NULL);
+                         request_interval, NULL);
 
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;

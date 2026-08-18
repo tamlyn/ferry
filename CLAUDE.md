@@ -252,6 +252,15 @@ on macOS or only with two hosts.
     host — re-pairing under a new identity address is what evicts the *other* host's
     bond (gotcha #2).
 
+11. **A central can persist the connection parameters you asked for, against the bond.**
+    After a spell of requesting 7.5 ms via `ble_l2cap_sig_update`, Windows started
+    *initiating* at 7.5 ms on its own — so deleting the request did not restore the
+    15 ms default, and a change meant to halve the radio's duty cycle changed nothing.
+    The parameters have to be asked for explicitly in either direction, and the
+    requested range must **exclude** the interval currently in use, or the central
+    satisfies the request by doing nothing. Check `conn params` on connect against
+    `conn params updated` a couple of seconds later to see what actually took.
+
 ## Observing BLE from the dev Mac
 
 The Mac running the toolchain is also one of the two KVM hosts, so both ends of a BLE
