@@ -6,7 +6,9 @@
 //  - Log *why* the last boot happened (esp_reset_reason), so an auto-reboot from a
 //    panic, brownout, or watchdog leaves a trace in the console instead of
 //    vanishing. (Panics already reboot in 0s here, so a crash self-recovers and
-//    would otherwise go unnoticed.)
+//    would otherwise go unnoticed.) Our own watchdogs leave a breadcrumb in RTC
+//    memory before rebooting, so the next boot can name which one fired without a
+//    serial capture having been attached at the moment it did.
 //
 //  - Run a monitor task that reboots the board if a BLE send wedges for seconds —
 //    the silent hang the task-WDT can't see, because a *blocked* task doesn't

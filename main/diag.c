@@ -3,13 +3,46 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 
 #include "ble_hid.h"
 #include "usb_input.h"
 
 static const char *TAG = "diag";
+
+// Why the *previous* boot ended, carried across the reset in RTC memory — which
+// survives esp_restart() but holds garbage after a power cycle, hence the magic.
+// esp_reset_reason() only ever says "software" for our two watchdogs, and which one
+// pulled the trigger is exactly the part we need; a freeze almost never happens
+// while a serial capture is attached to catch the log line as it goes out.
+#define CRUMB_MAGIC  0x46525259u   // 'FRRY'
+
+typedef enum {
+    CRUMB_USB_WEDGED = 1,
+    CRUMB_BLE_SEND_WEDGED,
+} crumb_reason_t;
+
+typedef struct {
+    uint32_t magic;
+    uint32_t reason;
+    uint32_t detail_ms;   // how long the wedge had lasted when we gave up on it
+    uint32_t uptime_ms;   // how long the board had been running
+} crumb_t;
+
+static RTC_NOINIT_ATTR crumb_t s_crumb;
+
+static void reboot_leaving_crumb(crumb_reason_t reason, uint32_t detail_ms)
+{
+    s_crumb.magic     = CRUMB_MAGIC;
+    s_crumb.reason    = reason;
+    s_crumb.detail_ms = detail_ms;
+    s_crumb.uptime_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    vTaskDelay(pdMS_TO_TICKS(50));   // let the line clear UART0 first
+    esp_restart();
+}
 
 // A single BLE notification never takes more than microseconds, so if one has been
 // in flight this long the send path is wedged, not busy — reboot so the device
@@ -79,6 +112,18 @@ void diag_log_reset_reason(void)
     } else {
         ESP_LOGI(TAG, "last reset: %s (code %d)", reset_reason_str(r), r);
     }
+
+    if (s_crumb.magic == CRUMB_MAGIC) {
+        const char *what = s_crumb.reason == CRUMB_USB_WEDGED      ? "USB input wedged"
+                         : s_crumb.reason == CRUMB_BLE_SEND_WEDGED ? "BLE send wedged"
+                                                                   : "unrecognised watchdog";
+        ESP_LOGW(TAG, "previous boot ended: %s after %ums, having run %us  <-- freeze",
+                 what, (unsigned)s_crumb.detail_ms, (unsigned)(s_crumb.uptime_ms / 1000));
+        // Cleared once reported, so a later reset that happens to leave RTC memory
+        // intact (the EN pin, a serial host waggling RTS) can't re-serve a stale
+        // crumb as fresh news.
+        s_crumb.magic = 0;
+    }
 }
 
 // One line that answers "where is a freeze stuck?" at a glance. Deltas since the
@@ -120,8 +165,7 @@ static void diag_task(void *arg)
         if (stuck >= SEND_STUCK_REBOOT_MS) {
             ESP_LOGE(TAG, "BLE send wedged %ums (free heap %u) — rebooting to recover",
                      (unsigned)stuck, (unsigned)esp_get_free_heap_size());
-            vTaskDelay(pdMS_TO_TICKS(50));   // let the line clear UART0 first
-            esp_restart();
+            reboot_leaving_crumb(CRUMB_BLE_SEND_WEDGED, stuck);
         }
 
         if (++tick < HEARTBEAT_EVERY_TICKS) {
@@ -205,8 +249,7 @@ static void usb_watchdog_task(void *arg)
         if (fail_count >= PROBE_FAILS_TO_REBOOT && failing_for >= pdMS_TO_TICKS(FAIL_WINDOW_MS)) {
             ESP_LOGE(TAG, "USB input wedged (%d probes failed over %ums) — rebooting to re-enumerate",
                      fail_count, (unsigned)pdTICKS_TO_MS(failing_for));
-            vTaskDelay(pdMS_TO_TICKS(50));   // let the line clear UART0 first
-            esp_restart();
+            reboot_leaving_crumb(CRUMB_USB_WEDGED, pdTICKS_TO_MS(failing_for));
         }
     }
 }
