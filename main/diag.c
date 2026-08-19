@@ -70,10 +70,16 @@ static void reboot_leaving_crumb(crumb_reason_t reason, uint32_t detail_ms)
 // next probe, a wedged controller keeps failing for as long as we care to ask.
 // (Before this the interval was stamped *before* the blocking probe, so its 5 s gap
 // collapsed to the 1 s tick and a single timeout rebooted the device ~1 s later.)
+//
+// The window is kept short because the whole of it is freeze the user sits through,
+// while the reboot it guards against costs 1.4 s to both hosts reconnected — and no
+// stall has ever answered a later probe (`usb probe recovered` has yet to fire). Two
+// failures 5 s apart is thin evidence by design: the cost of being wrong is a 1.4 s
+// reboot of an already-dead desk.
 #define T_SILENCE_MS           3000   // reports quiet this long before we start probing
 #define PROBE_INTERVAL_MS      5000   // gap between probes, measured from the last one finishing
-#define PROBE_FAILS_TO_REBOOT     3   // failures needed...
-#define FAIL_WINDOW_MS        15000   // ...and the span they must cover, before we call it wedged
+#define PROBE_FAILS_TO_REBOOT     2   // failures needed...
+#define FAIL_WINDOW_MS         5000   // ...and the span they must cover, before we call it wedged
 
 // A desk nobody is sitting at needs no fast probing, and every probe is a control
 // transfer injected alongside the HID interrupt pipes on a controller with a known
