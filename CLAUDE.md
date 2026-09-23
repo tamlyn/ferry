@@ -48,6 +48,16 @@ bits on the raw fd before pyserial configures the port — pyserial deasserts RT
 only *after* `os.open()` has let the driver assert them, which is long enough to reset
 the chip (seen: a POWERON reset 200 ms after attaching).
 
+**HCI trace.** The controller records every HCI packet in a 32 KB ring buffer
+(`CONFIG_BT_HCI_LOG_DEBUG_EN`, the "HCI trace" section of `ble_hid.c`) and prints
+it between `hci dump begin`/`end` lines on an abnormal disconnect and twenty
+seconds after each PC connect. `python tools/hci_extract.py ferry-MMDD.log` pulls
+the dumps out of a capture and converts them to btsnoop (Wireshark) under
+`parsed_logs/`. The buffer is hex text, so a moving mouse on either host evicts it
+in about two seconds; keep hands off during the window you want to see. Each dump
+holds the buffer's mutex for ~3 s and stalls the BLE host task for that long. It is
+a diagnostic for `windows-bt-crash.md`; take it out when that is settled.
+
 **Hold DTR deasserted while reading** (`p.dtr = False`). The BOOT button (GPIO0) is
 the layout selector (see below), and GPIO0 is tied into the serial auto-reset circuit
 — asserting DTR, which pyserial does by default on open, pulls GPIO0 low and registers
