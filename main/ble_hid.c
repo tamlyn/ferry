@@ -369,12 +369,20 @@ static void log_peer_id(const char *when, uint16_t conn_handle)
 // way, and the range must *exclude* the interval currently in use, or the central
 // satisfies the request by doing nothing.
 //
+// Slave latency is there for the PC's Intel AX201, whose Bluetooth firmware dies
+// with ~40% probability each time its Wi-Fi side re-keys or roams while an LE link
+// runs at latency 0 (windows-bt-crash.md). With latency the controller can skip idle
+// connection events through the handshake, as a commercial mouse's link does. It
+// costs nothing on reports: we still transmit at the next anchor whenever we have
+// data; only host-to-device writes (the LED report) can wait up to 360 ms.
+//
 // Asked for a couple of seconds after the link comes up rather than immediately: an
 // update issued while the connection is still settling — feature exchange,
 // encryption, the host's subscribe storm — is refused outright ("invalid HCI command
 // parameters").
 #define CONN_ITVL_REQ_MIN   12   // units of 1.25 ms -> 15 ms
 #define CONN_ITVL_REQ_MAX   14   //                  -> 17.5 ms
+#define CONN_LATENCY        24   // 360 ms of skippable events at 15 ms
 #define CONN_TIMEOUT_10MS  200   // 2 s, matching what the hosts ask for themselves
 #define PARAM_REQ_DELAY_MS 2000
 
@@ -401,7 +409,7 @@ static void request_interval(struct ble_npl_event *ev)
     struct ble_l2cap_sig_update_params lp = {
         .itvl_min            = CONN_ITVL_REQ_MIN,
         .itvl_max            = CONN_ITVL_REQ_MAX,
-        .slave_latency       = 0,
+        .slave_latency       = CONN_LATENCY,
         .timeout_multiplier  = CONN_TIMEOUT_10MS,
     };
     int rc = ble_l2cap_sig_update(conn, &lp, l2cap_update_done, NULL);
