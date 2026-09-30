@@ -17,3 +17,6 @@ dependencies.lock
 .cache/
 .DS_Store
 *.pyc
+
+# capture.py console logs
+/logs/

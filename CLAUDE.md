@@ -46,7 +46,9 @@ when the cable comes and goes, and writes a per-day log plus an events file cont
 only reboots, wedges, self-healed stalls and faults. It also clears the modem-control
 bits on the raw fd before pyserial configures the port — pyserial deasserts RTS/DTR
 only *after* `os.open()` has let the driver assert them, which is long enough to reset
-the chip (seen: a POWERON reset 200 ms after attaching).
+the chip (seen: a POWERON reset 200 ms after attaching). A reboot leaves a few NUL
+bytes in the log, after which macOS `grep` treats the file as binary and prints
+nothing — use `LC_ALL=C grep -a` on capture logs, tailed or not.
 
 **HCI trace.** The controller records every HCI packet in a 32 KB ring buffer
 (`CONFIG_BT_HCI_LOG_DEBUG_EN`, the "HCI trace" section of `ble_hid.c`) and prints
