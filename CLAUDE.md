@@ -6,6 +6,10 @@ positioning. See [README.md](README.md) for what it does and the architecture; t
 file is the build workflow, the hardware constraints, and the Bluetooth gotchas we
 hit so they don't have to be rediscovered.
 
+This repo is public on GitHub. Plans, investigation write-ups and capture logs live in
+`notes/`, a separate git repo with **no remote**, ignored by this one — commit them
+with `git -C notes …` and never add a remote to it.
+
 ## Build & flash
 
 ESP-IDF **v6.0.2**, installed via `eim` (Espressif's installer). The environment
@@ -41,7 +45,7 @@ of pulsing. Don't capture with `stty -f <port> …` + `cat`: macOS resets the te
 settings between the two opens, so the capture records garbage at the wrong baud.
 Keep the port held open by one process (pyserial) for the whole session.
 
-`tools/capture.py` does all of this: it holds the port open across reboots, reopens it
+`tools/capture.py notes/logs/ferry` does all of this: it holds the port open across reboots, reopens it
 when the cable comes and goes, and writes a per-day log plus an events file containing
 only reboots, wedges, self-healed stalls and faults. It also clears the modem-control
 bits on the raw fd before pyserial configures the port — pyserial deasserts RTS/DTR
@@ -58,7 +62,7 @@ the dumps out of a capture and converts them to btsnoop (Wireshark) under
 `parsed_logs/`. The buffer is hex text, so a moving mouse on either host evicts it
 in about two seconds; keep hands off during the window you want to see. Each dump
 holds the buffer's mutex for ~3 s and stalls the BLE host task for that long. It is
-a diagnostic for `windows-bt-crash.md`; take it out when that is settled.
+a diagnostic for `notes/windows-bt-crash.md`; take it out when that is settled.
 
 **Hold DTR deasserted while reading** (`p.dtr = False`). The BOOT button (GPIO0) is
 the layout selector (see below), and GPIO0 is tied into the serial auto-reset circuit

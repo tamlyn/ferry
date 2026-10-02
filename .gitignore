@@ -18,5 +18,6 @@ dependencies.lock
 .DS_Store
 *.pyc
 
-# capture.py console logs
-/logs/
+# Plans and debug logs: a separate local-only repo, never pushed
+/notes/
+/logs

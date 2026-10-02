@@ -9,7 +9,7 @@ else is printed as its opcode with the raw bytes.
 Times are seconds relative to the last packet in the dump, so a dump taken on a
 disconnect reads as a countdown to the radio going silent.
 
-Usage:  python tools/hci_decode.py logs/ferry-0928-hci1.txt [--last N]
+Usage:  python tools/hci_decode.py notes/logs/ferry-0928-hci1.txt [--last N]
 """
 import sys
 

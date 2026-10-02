@@ -246,7 +246,7 @@ static void advertise_if_slot_free(void)
 //
 // The controller records every HCI packet in a ring buffer (CONFIG_BT_HCI_LOG_DEBUG_EN).
 // The PC's Bluetooth radio dies with a hardware error its own OS cannot explain (see
-// windows-bt-crash.md); short of a sniffer, what passes between us at the link level
+// notes/windows-bt-crash.md); short of a sniffer, what passes between us at the link level
 // in the seconds beforehand is the only view of that we can get. The buffer is
 // printed on the events that bracket a failure: an abnormal disconnect (the radio
 // went silent) and a fixed delay after the PC connects, which is the window the
@@ -371,7 +371,7 @@ static void log_peer_id(const char *when, uint16_t conn_handle)
 //
 // Slave latency is there for the PC's Intel AX201, whose Bluetooth firmware dies
 // with ~40% probability each time its Wi-Fi side re-keys or roams while an LE link
-// runs at latency 0 (windows-bt-crash.md). With latency the controller can skip idle
+// runs at latency 0 (notes/windows-bt-crash.md). With latency the controller can skip idle
 // connection events through the handshake, as a commercial mouse's link does. It
 // costs nothing on reports: we still transmit at the next anchor whenever we have
 // data; only host-to-device writes (the LED report) can wait up to 360 ms.
