@@ -6,7 +6,7 @@
 // concept proved macOS *and* Windows accept over HOGP, honouring X/Y as an
 // absolute position rather than a relative delta. Reproduce it as-is unless a
 // host compatibility problem forces a change (see the HID interface note in
-// CLAUDE.md).
+// AGENTS.md).
 //
 //   - mouse: 8 buttons (1 byte) + 16-bit absolute X/Y, logical 0..32767
 //     (digitizer-style pointer) + a signed 8-bit relative scroll wheel + a

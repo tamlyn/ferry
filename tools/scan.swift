@@ -8,7 +8,7 @@
 //
 // This deliberately only SCANS, never connects. A CoreBluetooth connection from an
 // app can end up bonding, and a stray third bond evicts a real host's keys behind
-// its back (CLAUDE.md BLE gotcha #2) — the exact failure you'd be trying to debug.
+// its back (AGENTS.md BLE gotcha #2) — the exact failure you'd be trying to debug.
 //
 // CoreBluetooth hides BLE hardware addresses, so the `id=` shown is macOS's own
 // per-host peripheral UUID, *not* 68:EE:8F:63:97:32. Use

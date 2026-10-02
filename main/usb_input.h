@@ -32,7 +32,7 @@ void usb_input_stats(uint32_t *mouse_reports, uint32_t *kbd_reports, uint32_t *x
 // when there is no device to test — silence alone is not a wedge. Returns false
 // *only* when a probe was actually attempted and timed out or errored, which on
 // this hardware means the USB host controller's interrupt has stalled (see the
-// freeze notes in CLAUDE.md). Blocks up to ~5 s on a wedged controller.
+// freeze notes in AGENTS.md). Blocks up to ~5 s on a wedged controller.
 bool usb_input_probe_alive(void);
 
 #endif

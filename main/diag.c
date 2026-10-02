@@ -53,7 +53,7 @@ static void reboot_leaving_crumb(crumb_reason_t reason, uint32_t detail_ms)
 #define TICK_MS                1000
 #define HEARTBEAT_EVERY_TICKS  15     // ~15 s between activity/resource lines
 
-// USB-input stall watchdog (see CLAUDE.md freeze notes + plan). The ESP-IDF USB
+// USB-input stall watchdog (see AGENTS.md freeze notes + plan). The ESP-IDF USB
 // host controller's interrupt handler silently wedges after a while, so HID reports
 // stop arriving — mouse and keyboard together (they share the one controller). A
 // full re-init via esp_restart() recovers it. We can't reboot on report-silence

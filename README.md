@@ -132,7 +132,7 @@ across reboots.
 
 ## Building
 
-Firmware is built with ESP-IDF v6.0.2. See [CLAUDE.md](CLAUDE.md) for the build, flash
+Firmware is built with ESP-IDF v6.0.2. See [AGENTS.md](AGENTS.md) for the build, flash
 and log-capture workflow, the hardware constraints, and the Bluetooth implementation
 notes.
 
