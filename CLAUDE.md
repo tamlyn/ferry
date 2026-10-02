@@ -282,6 +282,13 @@ on macOS or only with two hosts.
     host — re-pairing under a new identity address is what evicts the *other* host's
     bond (gotcha #2).
 
+    Seen 2026-10-02 after a night undocked: the Mac's `bluetoothd` had dropped Ferry
+    from its LE auto-connect list (`Starting auto connection for 1 devices`, that one
+    being the MX Master) while Ferry advertised the whole time; after the toggle it
+    connected 120 ms after it started dialling. The disconnect that started it was
+    already gone from the unified log by morning (`bluetoothd` rotates out within a
+    few hours), so the *why* needs the Mac log captured as it happens.
+
 11. **A central can persist the connection parameters you asked for, against the bond.**
     After a spell of requesting 7.5 ms via `ble_l2cap_sig_update`, Windows started
     *initiating* at 7.5 ms on its own — so deleting the request did not restore the
