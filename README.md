@@ -1,137 +1,153 @@
 # Ferry (ESP32-S3)
 
-A wireless KVM that needs **no software on the computers it controls**. Plug a USB
-mouse and keyboard into one small board, pair it with two computers over Bluetooth
-LE, and drive both from that single set of peripherals — moving the cursor from one
-machine to the other by pushing it off the edge of the screen.
+A wireless KVM that needs no software on the computers it controls. Plug a USB mouse
+and keyboard into one small board, pair it with two computers over Bluetooth LE, and
+use the one set of peripherals for both. To move from one computer to the other, push
+the cursor off the edge of the screen.
 
-The board is an **ESP32-S3-WROOM-1 N16R8** ([dev board](https://www.aliexpress.com/item/1005006418608267.html)),
-chosen because the ESP32-S3 has a native USB host controller — the one capability a
-plain Bluetooth microcontroller lacks, and the reason a wired mouse and keyboard can
-be read at all.
+The board is an ESP32-S3-WROOM-1 N16R8 ([dev board](https://www.aliexpress.com/item/1005006418608267.html)).
+Unlike most Bluetooth microcontrollers, the S3 has a native USB host controller, so it
+can read a wired mouse and keyboard directly.
 
 ![Ferry hardware: an ESP32-S3 dev board with USB power and USB host ports, connected
 to a USB hub carrying a keyboard and a mouse](Ferry.jpg)
 
 ## What it does
 
-- Hosts a real USB mouse + keyboard, directly or through a hub.
-- Presents itself to each computer as an ordinary **Bluetooth LE HID** mouse +
-  keyboard. The computers need no drivers, agents, or configuration — they just see
-  a Bluetooth input device and pair with it from their built-in Bluetooth settings.
-- Holds **two computers connected at once** and sends input to whichever one
-  currently has control.
-- **Hops** the cursor across a desk of screens: push the pointer off a screen edge
-  and it crosses to whatever borders that edge — the other computer, or another
-  display of the *same* computer (e.g. a Mac's built-in and external monitors) — with
-  no disconnect, no reconnect, no button to press, no stall.
+- Hosts a USB mouse and keyboard, plugged in directly or through a hub.
+- Appears to each computer as an ordinary Bluetooth LE mouse and keyboard. You pair it
+  from the computer's own Bluetooth settings; there are no drivers or agents to install.
+- Stays connected to both computers at once and sends input to whichever one has
+  control.
+- Moves the cursor across every screen on the desk. Push the pointer off an edge and it
+  lands on whatever display borders that edge, whether that's the other computer or
+  another monitor on the same one. Nothing disconnects or reconnects, and there's no
+  button to press.
+- Turns the MX Master's gesture button into Mission Control on the Mac or Task View on
+  Windows, since neither does anything with that button by default.
 
-The intended setup is a personal laptop and a work laptop on one desk, driven by one
-good keyboard and mouse, with the cursor crossing between them as though they were a
-single machine — without installing anything on either.
+It's meant for a personal laptop and a work laptop sharing a desk: one good keyboard
+and mouse drive both as if they were a single machine, and neither needs anything
+installed.
 
 ## How it works
 
-Everything hinges on **absolute pointing**. A normal mouse reports *relative* motion
-("moved 3 left, 2 up"), and the computer decides where the cursor ends up — so the
-device can never know where the cursor actually is. Ferry instead maintains
-its own virtual cursor position and reports it to the computer as an **absolute**
-coordinate in a fixed logical space (0…32767 on each axis), digitizer-style. Because
-the device now *knows* where the cursor is, it can tell when the cursor has been
-pushed off the edge of one display and place it on the display that borders that edge
-— which is what a "hop" is.
+A normal mouse reports relative motion ("moved 3 left, 2 up") and the computer decides
+where the cursor ends up, so the mouse never knows where the cursor is. Ferry keeps
+its own virtual cursor instead. It adds up the mouse's motion on a model of the whole
+desk, so it knows which display the cursor is on and when it has been pushed off an
+edge.
 
-Holding both computers connected simultaneously (rather than switching between stored
-pairings) is what makes the hand-off instant: switching bonded devices costs about a
-second of reconnect lag each way, far too slow to feel like one continuous desktop.
+The desk is one global coordinate space with every display of both computers in it as
+a rectangle. Each rectangle belongs to one computer, so an edge between two of them is
+either a seam between two monitors of the same computer or a boundary between the two
+computers. Crossing a boundary just means sending input to the other computer.
 
-The displays of both computers are modelled as rectangles in one global coordinate
-space — a virtual **desk**. Each rectangle belongs to a host, so an edge between two
-of them is either a seam *within* one computer (a Mac's built-in and external
-monitors) or a boundary *between* the two computers. Crossing a boundary between
-computers is just a matter of switching which host Ferry drives. Crossing a seam
-within a computer is subtler: the host clamps an absolute position to the display its
-cursor is currently on, so absolute positioning alone cannot move the cursor onto that
-computer's *other* monitor. Ferry gets it across with a brief burst of **relative**
-motion (a second, relative pointer — report id 3), after which absolute positioning
-re-sticks on the new display.
+The two operating systems have to be driven differently:
 
-Input flows through these stages:
+- The Mac gets absolute coordinates (0–32767 on each axis, like a graphics tablet), so
+  Ferry can put its cursor exactly where it wants. macOS clamps an absolute position to
+  the display its cursor is already on, though, so to reach the Mac's other monitor
+  Ferry sends a short burst of relative motion across the seam and then goes back to
+  absolute positioning.
+- Windows maps absolute coordinates to its primary monitor only, which would leave its
+  other displays unreachable. So the PC gets relative motion throughout. When the
+  cursor arrives on the PC, Ferry sends one oversized movement that pins it into a
+  known corner of the desktop, then moves it from there to the right spot. For that to
+  line up, the PC's display sizes in the layout have to match its Windows desktop
+  pixels exactly.
 
-1. **USB host input** (`usb_input.c`) — hosts the mouse in HID report protocol,
-   parsing its own report descriptor to decode buttons (including back/forward and
-   extras), relative motion, and vertical + horizontal scroll; the keyboard runs in
-   boot protocol (modifiers + up to six keycodes). A mouse whose descriptor cannot be
-   parsed falls back to the basic boot report.
-2. **Absolute cursor model** (`cursor.c`) — accumulates the mouse's relative motion
-   into the virtual cursor's position in the desk's global coordinates, clamped to the
-   current display, and flags when the cursor has been pushed *sustainedly* past any
-   edge (a firm shove, not a fast flick).
-3. **Desk layout** (`layout.c`) — the map of which display rectangles sit where and
-   which host each belongs to; it answers, for any edge and position, what borders it
-   there and whether that neighbour is the same computer or the other one.
-4. **KVM routing** (`kvm.c`) — keeps the one active cursor moving through the desk,
-   routes input to the host owning the display it is on, and on an edge push crosses
-   it to the neighbouring display — nudging across a same-host seam with relative
-   motion, or switching hosts across a boundary between computers.
-5. **BLE HID peripheral** (`ble_hid.c`) — advertises and pairs as a Bluetooth LE
-   HID-over-GATT device, holds a connection to each computer, and delivers the
-   reports. It is built on the **NimBLE** host stack, which tracks each connection's
-   notification state independently — the property that lets two computers subscribe
-   to the same device at once.
+Ferry stays connected to both computers rather than switching between stored pairings,
+because reconnecting to a bonded device takes about a second each way. That's far too
+slow to feel like one desktop.
 
-The HID report layout (`our_descriptor.c`) is the device's external contract,
-split across two HID service instances:
+Input goes through five stages:
+
+1. **USB host input** (`usb_input.c`). The mouse runs in HID report protocol: Ferry
+   parses its report descriptor to find the buttons (including back, forward and
+   extras), motion, and vertical and horizontal scroll. A mouse whose descriptor can't
+   be parsed falls back to the basic boot report. The keyboard runs in boot protocol
+   (modifiers plus up to six keys).
+2. **Cursor model** (`cursor.c`). Accumulates relative motion into the virtual
+   cursor's position in desk coordinates, with pointer acceleration, clamped to the
+   current display. It flags a crossing only when the cursor is held against an edge
+   for a moment, so a firm shove crosses but a fast flick that reaches the edge doesn't.
+3. **Desk layout** (`layout.c`). Which display rectangles sit where and which computer
+   owns each. For any edge and position it says what's on the other side, and whether
+   that's the same computer or the other one.
+4. **KVM routing** (`kvm.c`). Moves the cursor around the desk, sends input to the
+   computer that owns the display it's on, and handles crossings: a relative nudge over
+   a seam on the Mac, or a host switch at a boundary between computers.
+5. **BLE HID peripheral** (`ble_hid.c`). Advertises, pairs, holds a connection to each
+   computer and sends the reports. It uses the NimBLE host stack, which tracks
+   notification subscriptions per connection, so two computers can subscribe to the
+   same device at once.
+
+The HID report layout (`our_descriptor.c`) is what the computers pair against, split
+across two HID service instances:
 
 | Report | Fields |
 |--------|--------|
-| Mouse (id 1) | 8 buttons (left/right/middle/back/forward/…); 16-bit **absolute** X and Y (0…32767); 8-bit vertical scroll wheel; 8-bit horizontal pan |
-| Keyboard (id 2) | modifier bitmask; up to 6 concurrent keycodes; LED output (Caps/Num Lock) |
-| Relative pointer (id 3, own HID service) | 8-bit **relative** X and Y, no buttons — nudges the cursor across a same-host display seam |
+| Mouse (id 1) | 8 buttons; 16-bit absolute X and Y (0–32767); 8-bit vertical wheel; 8-bit horizontal pan |
+| Keyboard (id 2) | modifiers; up to 6 keys; LED output (Caps/Num Lock) |
+| Relative pointer (id 3, own HID service) | 8 buttons; 16-bit relative X and Y; 8-bit vertical wheel; 8-bit horizontal pan |
 
-The relative pointer's isolation is deliberate, twice over: macOS won't
-synthesise drags from an absolute pointer's motion if the same HID device also
-contains a relative pointer collection (so it lives in its own HID service —
-the Bluetooth equivalent of a separate USB interface), and if it carried
-buttons macOS would elect it the click owner and stop honouring clicks on the
-absolute report (so the buttons live in the mouse report only).
+The relative pointer carries all of the PC's pointer input and the Mac's seam nudges.
+Its axes are 16-bit so a single report can pin the PC's cursor into a corner. It has a
+HID service to itself because macOS won't turn an absolute pointer's motion into a
+drag if the same HID device also contains a relative pointer. That's the Bluetooth
+equivalent of a separate USB interface, which is how DeskHop avoids the same problem.
+The Mac's clicks always go on report 1: back when the relative pointer shared a device
+with the absolute one and had buttons, macOS treated it as the click owner and ignored
+report 1's buttons.
 
 ## Pairing and use
 
-Pair from each computer's built-in Bluetooth: the device advertises as **"Ferry"**,
-and pairing is "Just Works" (no PIN — the device has no keypad), producing
-a bonded, encrypted link that persists across reboots. It keeps advertising while a
-second connection slot is free, so both computers can pair. Once both are connected,
-drive the mouse and keyboard normally and push the cursor off a screen edge to hop.
+Pair from each computer's Bluetooth settings. The device advertises as "Ferry" and
+pairs with Just Works (no PIN, since it has no keypad), giving an encrypted bond that
+survives reboots. It keeps advertising while a connection slot is free, so the second
+computer can find it too. Once both are connected, use the mouse and keyboard as normal
+and push the cursor off a screen edge to switch.
 
-The first computer to connect takes the first host slot, the second takes the second.
-How their displays are laid out on the virtual desk — which edges border which — is a
-fixed, compiled-in arrangement (see limitations), not something detected or chosen at
-pairing time.
+The Mac is recognised by its Bluetooth identity address and always takes the first
+host slot; the other computer takes the second. The order they connect in doesn't
+matter.
+
+The BOOT button on the board switches between the two desk layouts (see below). The
+on-board LED flashes blue for layout A and green for layout B, and the choice is saved
+across reboots.
 
 ## Current limitations
 
-- **Hard-coded desk layout.** The arrangement of displays — how many each computer
-  has, their sizes, and which edges border which — is compiled in, currently a single
-  configuration ("Config A": the developer's Mac with its built-in and external
-  monitors, plus the second computer at a fixed position with a placeholder
-  resolution). It also assumes the Mac connects first. There is no auto-detection or
-  user configuration yet; adapting it to another desk means editing `layout.c`.
-- **Report-protocol mice for the extras.** Back/forward, extra buttons, and
-  horizontal scroll need a mouse whose report descriptor can be parsed; a mouse that
-  only offers an unparseable descriptor falls back to basic boot input (three
-  buttons, motion, vertical wheel).
-- **Two computers.** The connection layer holds exactly two hosts live at once.
+- **Hard-coded desk.** The displays, their sizes and which edges border which are
+  compiled into `layout.c`. There are two layouts, both for one particular desk: a
+  MacBook, a Windows laptop, and an external monitor plugged into either the Mac
+  (layout A) or the PC (layout B). Ferry also expects one computer to be that Mac,
+  identified by the address in `ble_hid.c`, and the other to be a Windows PC. Using it
+  on another desk means editing both files.
+- **Extras need a parseable mouse.** Back/forward, extra buttons and horizontal scroll
+  depend on parsing the mouse's report descriptor. A mouse whose descriptor can't be
+  parsed falls back to boot input: three buttons, motion and a vertical wheel.
+- **Two computers.** The connection layer holds exactly two at once.
 
 ## Building
 
-Firmware is built with ESP-IDF v6.0.2. See [CLAUDE.md](CLAUDE.md) for the full build,
-flash, and log-capture workflow, the hardware wiring constraints, and the Bluetooth
-implementation notes.
+Firmware is built with ESP-IDF v6.0.2. See [CLAUDE.md](CLAUDE.md) for the build, flash
+and log-capture workflow, the hardware constraints, and the Bluetooth implementation
+notes.
+
+## Related projects
+
+[DeskHop](https://github.com/hrvach/deskhop) does the same job over wires. It's two
+Raspberry Pi Picos joined through a digital isolator, each plugged into one computer
+over USB, with the keyboard and mouse plugged into the device. The cursor moves
+between computers at the screen edge and neither computer needs any software. I only
+came across it after building Ferry. If you don't need wireless, it's the more mature
+project, and the repo includes a PCB and a 3D-printable case.
 
 ## Credits
 
 Ferry was inspired by [jfedor2's Screen Hopper](https://github.com/jfedor2/screen-hopper),
-which first showed the idea of a host-software-free hardware KVM that hands the cursor
-between machines. Ferry is an independent, from-scratch implementation — different
-board, different stack, different code — but it owes that project the concept.
+which first showed a hardware KVM that hands the cursor between machines without any
+software on them. Ferry is a separate implementation on different hardware with a
+different stack, but the idea came from there.

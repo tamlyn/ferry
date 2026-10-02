@@ -168,10 +168,11 @@ in `ble_hid.c` is ours regardless.
 The HID report maps in `our_descriptor.c` are the **external contract** the hosts
 pair against, split across **two HID service instances**: instance one is the mouse
 (report id 1: 8 buttons + absolute X/Y + a relative scroll wheel + a horizontal AC
-Pan byte) + keyboard (id 2); instance two is a motion-only relative pointer (id 3,
-relative X/Y, used to nudge the cursor across a same-host display seam — see `kvm.c`
-/ `layout.c`). Two macOS behaviours force that shape, both established by A/B testing
-on this device:
+Pan byte) + keyboard (id 2); instance two is a relative pointer (id 3: 8 buttons,
+16-bit relative X/Y, wheel, AC Pan). Report 3 carries all of the PC's pointer input,
+since Windows maps absolute X/Y to its primary monitor only, plus the Mac's nudges
+across a same-host display seam (see `kvm.c` / `layout.c`). Two macOS behaviours
+force that shape, both established by A/B testing on this device:
 
 - **The relative pointer must live in a separate HID service.** If an absolute and
   a relative pointer share one HID device, macOS moves the cursor and clicks but
@@ -180,11 +181,13 @@ on this device:
   putting its relative helper mouse on a separate interface; separate HOGP service
   instances are the BLE equivalent (NimBLE supports them natively;
   `CONFIG_BT_NIMBLE_SVC_HID_MAX_INSTANCES=2`).
-- **Report 3 must stay button-less.** When it had buttons (while still sharing one
-  device), macOS elected the *relative* pointer the click owner and ignored report
-  1's buttons; mirroring clicks onto report 3 recovered the click but not
-  click-and-drag, because macOS won't fuse a button held on one pointer with motion
-  arriving on the other. Buttons ride report 1 only.
+- **The Mac's buttons ride report 1 only.** When report 3 had buttons (while still
+  sharing one device), macOS elected the *relative* pointer the click owner and
+  ignored report 1's buttons; mirroring clicks onto report 3 recovered the click but
+  not click-and-drag, because macOS won't fuse a button held on one pointer with
+  motion arriving on the other. Report 3 has buttons again because the PC drives
+  everything through it. The separate service instance may have removed the macOS
+  problem, but that's untested, so the Mac is only ever sent zero buttons on report 3.
 
 The mouse+keyboard map and the scroll wheel are proven on macOS + Windows.
 
