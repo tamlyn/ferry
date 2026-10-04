@@ -370,16 +370,18 @@ static void log_peer_id(const char *when, uint16_t conn_handle)
 // satisfies the request by doing nothing.
 //
 // Slave latency is there for the PC's Intel AX201, whose Bluetooth firmware dies
-// with ~40% probability each time its Wi-Fi side re-keys or roams while an LE link
-// runs at latency 0 (notes/windows-bt-crash.md). With latency the controller can skip idle
-// connection events through the handshake, as a commercial mouse's link does. It
-// costs nothing on reports: we still transmit at the next anchor whenever we have
-// data; only host-to-device writes (the LED report) can wait up to 360 ms.
+// with ~40% probability each time its Wi-Fi side re-keys while an LE link runs at
+// latency 0 (notes/windows-bt-crash.md). With latency 24 it has died far less often.
+// Why is unclear, since latency only lets *us* skip events; the central still
+// transmits at every one. It costs nothing on reports: we still transmit at the next
+// anchor whenever we have data; only host-to-device writes (the LED report) can wait
+// up to 360 ms.
 //
-// Asked for a couple of seconds after the link comes up rather than immediately: an
+// Asked a couple of seconds after the link is encrypted rather than immediately: an
 // update issued while the connection is still settling — feature exchange,
 // encryption, the host's subscribe storm — is refused outright ("invalid HCI command
-// parameters").
+// parameters"). Timing from encryption, not connect, because a first pairing takes
+// longer than the delay and Windows rejects the request mid-pairing.
 #define CONN_ITVL_REQ_MIN   12   // units of 1.25 ms -> 15 ms
 #define CONN_ITVL_REQ_MAX   14   //                  -> 17.5 ms
 #define CONN_LATENCY        24   // 360 ms of skippable events at 15 ms
@@ -388,6 +390,21 @@ static void log_peer_id(const char *when, uint16_t conn_handle)
 
 static struct ble_npl_callout s_param_co;
 static uint16_t s_param_conn;
+
+// This NimBLE fork asks for 251-byte packets on every new connection, and the
+// controller then advertises 251 for receiving too, so the AX201 sizes the link for
+// ~2 ms packets each way where a mouse's link stays at the 27-byte default. Our
+// largest report fits in 27 with room to spare. Suppressed (via a linker wrap, the
+// call being unconditional inside ble_gap.c) to test whether link size is part of
+// what the AX201 trips over; a host that wants larger packets can still ask.
+int __wrap_ble_hs_hci_util_set_data_len(uint16_t conn_handle, uint16_t tx_octets,
+                                        uint16_t tx_time)
+{
+    (void)conn_handle;
+    (void)tx_octets;
+    (void)tx_time;
+    return 0;
+}
 
 // The central's verdict on the L2CAP request — the only place it is visible, since a
 // rejection produces no connection update to notice the absence of.
@@ -428,12 +445,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
                      event->connect.conn_handle, s ? (int)(s - s_hosts) : -1);
             log_conn_params("conn params", event->connect.conn_handle);
             log_peer_id("connect", event->connect.conn_handle);
-            // Only the relatively-driven host is asked; the Mac renegotiates its
-            // own anyway. Deferred — see request_interval.
             if (s && (int)(s - s_hosts) != SLOT_MAC) {
-                s_param_conn = event->connect.conn_handle;
-                ble_npl_callout_reset(&s_param_co,
-                                      ble_npl_time_ms_to_ticks32(PARAM_REQ_DELAY_MS));
                 hci_trace_on_pc_connect(event->connect.conn_handle);
             }
         } else {
@@ -490,7 +502,14 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_ENC_CHANGE: {
         if (event->enc_change.status == 0) {
-            slot_find_or_alloc(event->enc_change.conn_handle);
+            host_slot_t *s = slot_find_or_alloc(event->enc_change.conn_handle);
+            // Only the relatively-driven host is asked; the Mac renegotiates its
+            // own anyway. Deferred — see request_interval.
+            if (s && (int)(s - s_hosts) != SLOT_MAC) {
+                s_param_conn = event->enc_change.conn_handle;
+                ble_npl_callout_reset(&s_param_co,
+                                      ble_npl_time_ms_to_ticks32(PARAM_REQ_DELAY_MS));
+            }
         }
         struct ble_gap_conn_desc desc;
         int rc = ble_gap_conn_find(event->enc_change.conn_handle, &desc);
