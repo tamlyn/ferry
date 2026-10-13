@@ -18,10 +18,6 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
-#include "freertos/task.h"
-#include "hci_log/bt_hci_log.h"
 
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
@@ -242,84 +238,6 @@ static void advertise_if_slot_free(void)
     ESP_LOGI(TAG, "advertising as \"%s\" (%d slot(s) free)", name, free_slots());
 }
 
-// ---- HCI trace ------------------------------------------------------------
-//
-// The controller records every HCI packet in a ring buffer (CONFIG_BT_HCI_LOG_DEBUG_EN).
-// The PC's Bluetooth radio dies with a hardware error its own OS cannot explain (see
-// notes/windows-bt-crash.md); short of a sniffer, what passes between us at the link level
-// in the seconds beforehand is the only view of that we can get. The buffer is
-// printed on the events that bracket a failure: an abnormal disconnect (the radio
-// went silent) and a fixed delay after the PC connects, which is the window the
-// post-boot crash lands in, so a run that survives gives the reference to compare
-// against. Extract a dump from the capture with tools/hci_extract.py.
-//
-// Printing holds the buffer's mutex for the whole dump, and every HCI record call
-// blocks on that mutex, so the host task stalls for about three seconds at 115200
-// baud. Done from its own task so the GAP callback returns promptly; the stall itself
-// is accepted for a diagnostic build.
-
-#define HCI_DUMP_AFTER_CONNECT_MS 20000
-
-static SemaphoreHandle_t s_hci_dump_sem;
-static esp_timer_handle_t s_hci_dump_timer;
-static uint16_t s_hci_dump_conn = BLE_HS_CONN_HANDLE_NONE;   // conn the timer is armed for
-static char s_hci_dump_why[48];
-
-static void hci_dump_request(const char *why)
-{
-    strlcpy(s_hci_dump_why, why, sizeof(s_hci_dump_why));
-    xSemaphoreGive(s_hci_dump_sem);
-}
-
-static void hci_dump_timer_cb(void *arg)
-{
-    hci_dump_request("20s after PC connect");
-}
-
-static void hci_dump_task(void *param)
-{
-    for (;;) {
-        xSemaphoreTake(s_hci_dump_sem, portMAX_DELAY);
-        ESP_LOGI(TAG, "hci dump begin (%s)", s_hci_dump_why);
-        bt_hci_log_hci_data_show();
-        ESP_LOGI(TAG, "hci dump end");
-    }
-}
-
-static void hci_trace_init(void)
-{
-    ESP_ERROR_CHECK(bt_hci_log_init());
-    s_hci_dump_sem = xSemaphoreCreateBinary();
-    const esp_timer_create_args_t args = { .callback = hci_dump_timer_cb, .name = "hci_dump" };
-    ESP_ERROR_CHECK(esp_timer_create(&args, &s_hci_dump_timer));
-    xTaskCreate(hci_dump_task, "hci_dump", 3072, NULL, tskIDLE_PRIORITY + 1, NULL);
-}
-
-// The PC connected: arm the reference dump. Re-arming on a fresh connection is
-// deliberate, so a link that survives a recovered reset gets its own dump.
-static void hci_trace_on_pc_connect(uint16_t conn_handle)
-{
-    esp_timer_stop(s_hci_dump_timer);   // harmless if not running
-    s_hci_dump_conn = conn_handle;
-    ESP_ERROR_CHECK(esp_timer_start_once(s_hci_dump_timer, HCI_DUMP_AFTER_CONNECT_MS * 1000LL));
-}
-
-static void hci_trace_on_disconnect(uint16_t conn_handle, int reason)
-{
-    if (conn_handle == s_hci_dump_conn) {
-        esp_timer_stop(s_hci_dump_timer);
-        s_hci_dump_conn = BLE_HS_CONN_HANDLE_NONE;
-    }
-    // Supervision timeout (the peer's radio stopped answering) and MIC failure (it
-    // garbled crypto on a live link) are the two ways the PC's failure reaches us.
-    if (reason == BLE_HS_HCI_ERR(BLE_ERR_CONN_SPVN_TMO) ||
-        reason == BLE_HS_HCI_ERR(BLE_ERR_CONN_TERM_MIC)) {
-        char why[48];
-        snprintf(why, sizeof(why), "disconnect conn=%d reason=%d", conn_handle, reason);
-        hci_dump_request(why);
-    }
-}
-
 // ---- GAP events -----------------------------------------------------------
 
 // Log the link's negotiated connection parameters — the interval bounds how
@@ -445,9 +363,6 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
                      event->connect.conn_handle, s ? (int)(s - s_hosts) : -1);
             log_conn_params("conn params", event->connect.conn_handle);
             log_peer_id("connect", event->connect.conn_handle);
-            if (s && (int)(s - s_hosts) != SLOT_MAC) {
-                hci_trace_on_pc_connect(event->connect.conn_handle);
-            }
         } else {
             ESP_LOGW(TAG, "connect failed; status=%d", event->connect.status);
             // A connection that dies during establishment gets a failed CONNECT
@@ -473,7 +388,6 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         if (event->disconnect.conn.conn_handle == s_param_conn) {
             ble_npl_callout_stop(&s_param_co);   // don't fire at a dead handle
         }
-        hci_trace_on_disconnect(event->disconnect.conn.conn_handle, event->disconnect.reason);
         advertise_if_slot_free();
         return 0;
     }
@@ -704,8 +618,6 @@ static void host_task(void *param)
 
 esp_err_t ble_hid_init(void)
 {
-    hci_trace_init();   // before the host starts, so the first packets are recorded
-
     esp_err_t ret = nimble_port_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "nimble_port_init failed: %d", ret);
